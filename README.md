@@ -27,11 +27,11 @@ SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネ
 ## 前提条件
 
 - Windows
+- Conda
 - Rust toolchain（`cargo`）
 - VOICEPEAK 本体
 - 解析対象の `.vpp` ファイル
-- 音声生成時は VOICEPEAK の named pipe に接続できること
-- MFA alignment を行う場合は MFA 3.x と日本語モデル
+- MFA alignment を行う場合は MFA 3.4.1、PostgreSQL、日本語モデル
 
 このリポジトリの既定 VPP パスは次です。
 
@@ -215,9 +215,55 @@ MFA 用の全 utterance 情報をまとめたファイルです。
 
 `--strict` なしで処理を継続した場合の synthesis / edit response エラーを保存します。
 
-## MFA 辞書と alignment
+## MFA 3.4.1 + PostgreSQL
 
-MFA の公式モデルをインストールします。
+今回の固定構成は **Windows + Conda + MFA 3.4.1 + MFA 管理 PostgreSQL + 日本語モデル** です。MFA のデータベースをバージョン間で混在させないため、専用の root directory を使います。
+
+### 環境構築
+
+```powershell
+conda create -n aligner -c conda-forge `
+  montreal-forced-aligner=3.4.1 `
+  postgresql `
+  spacy `
+  sudachipy `
+  sudachidict-core `
+  -y
+
+conda activate aligner
+mfa version                         # 3.4.1
+postgres --version
+```
+
+MFA の root directory を設定します。PowerShell を開き直した後も使う場合は User 環境変数として登録してください。
+
+```powershell
+$env:MFA_ROOT_DIR="$HOME\Documents\MFA_341_PG"
+
+[Environment]::SetEnvironmentVariable(
+  "MFA_ROOT_DIR",
+  "$HOME\Documents\MFA_341_PG",
+  "User"
+)
+```
+
+PostgreSQL backend と自動 server 起動を MFA の既定値にします。
+
+```powershell
+mfa configure --enable_use_postgres --enable_auto_server
+mfa server init --use_postgres --verbose
+```
+
+MFA が管理する PostgreSQL はローカル用途の一時的な backend です。通常は `auto_server` により各コマンドの開始・終了時に自動管理されます。DB を作り直す場合だけ次を実行します。
+
+```powershell
+mfa server delete --use_postgres
+mfa server init --use_postgres --verbose
+```
+
+MFA 3.4.1 の SQLite backend では `word_interval_temp` が存在しないという既知 issue が open になっているため、このプロジェクトでは alignment に PostgreSQL を使用します（[issue #965](https://github.com/MontrealCorpusTools/Montreal-Forced-Aligner/issues/965)）。
+
+### 日本語モデル
 
 ```powershell
 mfa model download acoustic japanese_mfa
@@ -225,7 +271,40 @@ mfa model download dictionary japanese_mfa
 mfa model download g2p japanese_katakana_mfa
 ```
 
-データ生成時に `mfa` CLI が PATH に存在すると、次を自動実行します。
+役割は次の通りです。
+
+```text
+japanese_mfa dictionary
+  └─ OOV → japanese_katakana_mfa G2P
+japanese_mfa acoustic model
+  └─ forced alignment
+```
+
+このプロジェクトは VPP から確定カタカナ読みを復元するため、標準読みの再推定ではなく `japanese_katakana_mfa` を OOV fallback として使います。
+
+### `.lab` の規則
+
+`.lab` は WAV と同じ basename の UTF-8 テキストで、1 行の連結カタカナにします。
+
+```text
+b000_v003.wav
+b000_v003.lab
+```
+
+```text
+ドオスンノ、コノオミセ。カンッゼンニカンコドリガナイチャッテルジャナイ。
+```
+
+- VPP の `tokens[].syl[].s` を発話順に連結する
+- token 境界の人工的な空白を入れない
+- `、。？！…・` などの句読点・記号は保持する
+- VPP に保存された実発音の `ッ`、長音などを標準読みへ戻さない
+- `.lab` に `pau` / `sil` を書かない。無音区間は MFA の alignment で扱う
+- 読みが空の非句読点 token は黙って削除せず、`metadata.json` の warning として確認する
+
+### `custom.dict`
+
+データ生成時に `mfa` CLI が PATH に存在すると、VPP 由来語彙から次を自動生成します。
 
 ```text
 mfa g2p <OUTPUT_DIR>/mfa/custom_words.txt \
@@ -234,26 +313,60 @@ mfa g2p <OUTPUT_DIR>/mfa/custom_words.txt \
   --sorted
 ```
 
+`custom_words.txt` は辞書入力語彙であり、`.lab` に空白を挿入するためのものではありません。alignment では標準の `japanese_mfa` dictionary と `--g2p_model_path japanese_katakana_mfa` を使用します。
+
 生成状態は `manifest.json` の `mfa.dictionary.status` で確認できます。
 
+```text
 not_available  MFA CLI が PATH にない
 failed         MFA CLI はあるが G2P 実行に失敗
 generated      custom.dict を生成済み
-
-`custom_words.txt` は VPP 由来の辞書入力語彙です。`.lab` に空白を挿入するためのものではありません。.lab の tokenization は MFA Japanese tokenizer に委譲します。
-
-MFA alignment の基本形:
-
-```powershell
-mfa align `
-  dataset\speed_0.750 `
-  japanese_mfa `
-  japanese_mfa `
-  aligned\speed_0.750 `
-  --g2p_model_path japanese_katakana_mfa
 ```
 
-実際の corpus 配置や MFA のバージョンに応じて、MFA の tokenizer / dictionary 設定を確認してください。まず `manifest.json` と `metadata.json` で `mfa_warnings` が 0 であることを確認してから alignment を実行してください。
+### alignment
+
+まず `--blocks` または `--max-blocks` で少量の WAV/LAB を生成し、alignment を確認します。
+
+```powershell
+cargo run --release -- `
+  "voicepeak.vpp" `
+  dataset-smoke `
+  --max-blocks 1 `
+  --variants 5
+```
+
+MFA 3.4.1 の基本 alignment:
+
+```powershell
+$CORPUS="$PWD\dataset-smoke\speed_1.125\wav"
+$OUTPUT="$PWD\aligned-smoke"
+
+mfa align `
+  $CORPUS `
+  japanese_mfa `
+  japanese_mfa `
+  $OUTPUT `
+  --g2p_model_path japanese_katakana_mfa `
+  --single_speaker `
+  --use_postgres `
+  --clean `
+  --overwrite `
+  --output_format long_textgrid `
+  --verbose
+```
+
+`mfa align` の引数順は `CORPUS_DIRECTORY DICTIONARY_PATH ACOUSTIC_MODEL_PATH OUTPUT_DIRECTORY` です。プログラムから読む場合は `--output_format json` を使えます。
+
+`mfa validate` は WAV/LAB 対応、OOV、入力形式の確認用です。G2P fallback は `mfa align --g2p_model_path ...` で適用されるため、最終評価は `align` の出力で行います。
+
+smoke test の acceptance criteria:
+
+1. すべての WAV に同名 `.lab` がある
+2. alignment 結果の `phones` tier が生成される
+3. 通常発音部分に `spn` がない
+4. `ッ`、`ン`、長音、句読点前後の境界を数件目視確認する
+
+出力形式や backend の詳細は [MFA alignment](https://montreal-forced-aligner.readthedocs.io/en/v3.4.1/user_guide/workflows/alignment.html)、[MFA configuration](https://montreal-forced-aligner.readthedocs.io/en/v3.4.1/user_guide/configuration/index.html)、[MFA servers](https://montreal-forced-aligner.readthedocs.io/en/v3.4.1/user_guide/server/index.html) を参照してください。
 
 ## 検証
 
