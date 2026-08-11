@@ -286,11 +286,11 @@ git push origin v0.1.0
 CI は次を順番に実行します。
 
 1. `generate_voice_from_voicepeak.exe` を `cargo build --locked --release` でビルド
-2. [Rumia-Channel/julius](https://github.com/Rumia-Channel/julius) を取得し、MinGW で Windows 用 Julius とツール群をビルド
+2. [Rumia-Channel/julius](https://github.com/Rumia-Channel/julius) を取得し、CMake の `x64-windows-ninja` preset と MSVC x64 で Windows 用 Julius とツール群をビルド
 3. [julius-speech/grammar-kit](https://github.com/julius-speech/grammar-kit) から日本語音響モデル、HMM list、サンプルデータを取得
 4. すべてを `generate_voice_from_voicepeak_windows_x64_<tag>.zip` にまとめて GitHub Release へ添付
 
-Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
+Julius は MinGW ではなく MSVC ベースでビルドし、vcpkg の zlib は静的リンクします。Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
 ```text
 generate_voice_from_voicepeak/
 ├─ generate_voice_from_voicepeak.exe

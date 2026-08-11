@@ -11,7 +11,7 @@ permissions:
 
 env:
   JULIUS_REPOSITORY: https://github.com/Rumia-Channel/julius.git
-  JULIUS_REF: 1604011abafa2751181767f785e9aa4740743c65
+  JULIUS_REF: d0141251ba9b905e4a69a6dcc46c8d0e96975504
   GRAMMAR_KIT_REPOSITORY: https://github.com/julius-speech/grammar-kit.git
   GRAMMAR_KIT_REF: f078d29099c29c32b7acd345872aaa003b8638fb
 
@@ -47,6 +47,8 @@ jobs:
     name: Build Windows release with Julius
     needs: validate
     runs-on: windows-2025
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
     steps:
       - uses: actions/checkout@v4
 
@@ -59,16 +61,11 @@ jobs:
       - name: Build generate_voice_from_voicepeak
         run: cargo build --locked --release
 
-      - uses: msys2/setup-msys2@v2
+      - name: Set up MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            base-devel
-            git
-            mingw-w64-x86_64-toolchain
-            mingw-w64-x86_64-zlib
-            perl
+          arch: x64
+
 
       - name: Fetch pinned Julius and grammar-kit sources
         shell: pwsh
@@ -91,29 +88,23 @@ jobs:
           if ((git -C $grammarKitRoot rev-parse HEAD).Trim() -ne $env:GRAMMAR_KIT_REF) {
             throw "Grammar-kit checkout did not resolve to the pinned commit."
           }
+      - name: Set up vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ env.VCPKG_ROOT }}
+          vcpkgJsonGlob: "**/build/julius-src/vcpkg.json"
 
-      - name: Build Julius with MinGW
-        shell: msys2 {0}
-        run: |
-          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
-          cd "$workspace/build/julius-src"
-          ./configure --host=x86_64-w64-mingw32 --disable-sdlmain
-          make -j"$(nproc)"
 
-      - name: Collect MinGW runtime DLLs
-        shell: msys2 {0}
+      - name: Configure Julius with CMake
+        shell: pwsh
         run: |
-          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
-          source_root="$workspace/build/julius-src"
-          runtime_dir="$source_root/runtime"
-          mkdir -p "$runtime_dir"
-          find "$source_root" -type f -iname '*.exe' -print0 \
-            | xargs -0 -r -n1 ldd 2>/dev/null \
-            | awk '$3 ~ /^\/mingw64\/bin\/.*\.dll$/ {print $3}' \
-            | sort -u \
-            | while read -r dll; do
-                cp "$dll" "$runtime_dir/"
-              done
+          Push-Location .\build\julius-src
+          cmake --preset x64-windows-ninja
+          Pop-Location
+
+      - name: Build Julius with MSVC
+        shell: pwsh
+        run: cmake --build .\build\julius-src\build\x64-windows-ninja --config Release --parallel
 
       - name: Package application and Julius runtime
         shell: pwsh
