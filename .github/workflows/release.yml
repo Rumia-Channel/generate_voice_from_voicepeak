@@ -1,0 +1,173 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "[0-9]*"
+
+permissions:
+  contents: write
+
+env:
+  JULIUS_REPOSITORY: https://github.com/Rumia-Channel/julius.git
+  JULIUS_REF: 1604011abafa2751181767f785e9aa4740743c65
+  GRAMMAR_KIT_REPOSITORY: https://github.com/julius-speech/grammar-kit.git
+  GRAMMAR_KIT_REF: f078d29099c29c32b7acd345872aaa003b8638fb
+
+jobs:
+  validate:
+    name: Validate release tag
+    runs-on: ubuntu-latest
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate tag matches Cargo.toml version
+        id: version
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content Cargo.toml -Raw
+          if ($cargoToml -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
+            throw "Could not find package version in Cargo.toml."
+          }
+
+          $version = $Matches[1]
+          $tag = "${{ github.ref_name }}"
+          $escapedVersion = [regex]::Escape($version)
+          if ($tag -notmatch "^(?:v)?$escapedVersion(?:[-+][0-9A-Za-z.-]+)?$") {
+            throw "Tag '$tag' does not match Cargo.toml version '$version'."
+          }
+
+          $isPrerelease = $tag -match "^[^+]*-"
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+  build:
+    name: Build Windows release with Julius
+    needs: validate
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-windows-x64
+
+      - name: Build generate_voice_from_voicepeak
+        run: cargo build --locked --release
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-zlib
+            perl
+
+      - name: Fetch pinned Julius and grammar-kit sources
+        shell: pwsh
+        run: |
+          $buildRoot = Join-Path $env:GITHUB_WORKSPACE "build"
+          New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+
+          $juliusRoot = Join-Path $buildRoot "julius-src"
+          git clone --depth 1 $env:JULIUS_REPOSITORY $juliusRoot
+          git -C $juliusRoot checkout --detach $env:JULIUS_REF
+          if ((git -C $juliusRoot rev-parse HEAD).Trim() -ne $env:JULIUS_REF) {
+            throw "Julius checkout did not resolve to the pinned commit."
+          }
+
+          $grammarKitRoot = Join-Path $buildRoot "grammar-kit"
+          git clone --depth 1 $env.GRAMMAR_KIT_REPOSITORY $grammarKitRoot
+          git -C $grammarKitRoot checkout --detach $env.GRAMMAR_KIT_REF
+          if ((git -C $grammarKitRoot rev-parse HEAD).Trim() -ne $env.GRAMMAR_KIT_REF) {
+            throw "Grammar-kit checkout did not resolve to the pinned commit."
+          }
+
+      - name: Build Julius with MinGW
+        shell: msys2 {0}
+        run: |
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+          cd "$workspace/build/julius-src"
+          ./configure --host=x86_64-w64-mingw32 --disable-sdlmain
+          make -j"$(nproc)"
+
+      - name: Collect MinGW runtime DLLs
+        shell: msys2 {0}
+        run: |
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+          source_root="$workspace/build/julius-src"
+          runtime_dir="$source_root/runtime"
+          mkdir -p "$runtime_dir"
+          find "$source_root" -type f -iname '*.exe' -print0 \
+            | xargs -0 -r -n1 ldd 2>/dev/null \
+            | awk '$3 ~ /^\/mingw64\/bin\/.*\.dll$/ {print $3}' \
+            | sort -u \
+            | while read -r dll; do
+                cp "$dll" "$runtime_dir/"
+              done
+
+      - name: Package application and Julius runtime
+        shell: pwsh
+        run: |
+          .\scripts\package-release.ps1 `
+            -BinaryPath ".\target\release\generate_voice_from_voicepeak.exe" `
+            -JuliusBuildRoot ".\build\julius-src" `
+            -GrammarKitRoot ".\build\grammar-kit" `
+            -JuliusRef $env:JULIUS_REF `
+            -GrammarKitRef $env:GRAMMAR_KIT_REF `
+            -Version "${{ github.ref_name }}" `
+            -OutputDir ".\dist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: generate_voice_from_voicepeak_windows_x64
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - validate
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: generate_voice_from_voicepeak_windows_x64
+          path: release-assets
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          IS_PRERELEASE: ${{ needs.validate.outputs.prerelease }}
+        shell: pwsh
+        run: |
+          $assets = Get-ChildItem -Path "release-assets" -File | Sort-Object Name
+          if ($assets.Count -eq 0) {
+            throw "No release assets were downloaded."
+          }
+
+          $releaseArgs = @("--title", $env:TAG_NAME, "--verify-tag", "--generate-notes")
+          if ($env:IS_PRERELEASE -eq "true") {
+            $releaseArgs += "--prerelease"
+          }
+
+          gh release view $env:TAG_NAME --repo $env:REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:TAG_NAME --repo $env:REPOSITORY @releaseArgs
+          } elseif ($env:IS_PRERELEASE -eq "true") {
+            gh release edit $env:TAG_NAME --repo $env:REPOSITORY --prerelease
+          }
+
+          foreach ($asset in $assets) {
+            gh release upload $env:TAG_NAME $asset.FullName --repo $env:REPOSITORY --clobber
+          }

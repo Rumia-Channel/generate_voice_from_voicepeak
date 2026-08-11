@@ -32,6 +32,7 @@ SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネ
 - VOICEPEAK 本体
 - 解析対象の `.vpp` ファイル
 - MFA alignment を行う場合は MFA 3.4.1、PostgreSQL、日本語モデル
+- ffmpeg（PATH に存在する場合、Julius 用 WAV を自動生成）
 
 このリポジトリの既定 VPP パスは次です。
 
@@ -161,8 +162,14 @@ dataset/
 ├─ speed_0.875/
 ├─ speed_1.000/
 ├─ speed_1.125/
-└─ speed_1.250/
-```
+├─ speed_1.250/
+└─ julius/
+   └─ speed_*/
+      ├─ wav/
+      │  ├─ b000_v003.wav
+      │  └─ b000_v003.lab
+      └─ phones/
+         └─ b000_v003.txt
 
 ### `.lab`
 
@@ -182,7 +189,57 @@ dataset/
 ドオスンノ、コノオミセ。カンッゼンニカンコドリガナイチャッテルジャナイ。
 ```
 
+### Julius 用 WAV
+
+`ffmpeg` が PATH に存在する場合、各 VOICEPEAK WAV から Julius 用の派生 WAV を自動生成します。元の WAV は変更しません。
+
+```text
+dataset/julius/speed_0.750/wav/b000_v003.wav
+dataset/julius/speed_0.750/wav/b000_v003.lab
+```
+
+派生 WAV の形式は Julius の標準日本語 GMM-HMM に合わせて固定します。
+
+```text
+sample rate: 16,000 Hz
+channels:    mono
+sample format: signed 16-bit PCM (pcm_s16le)
+```
+
+内部では次と同等の変換を行います。
+
+```text
+ffmpeg -hide_banner -loglevel error -y -i input.wav -vn -ar 16000 -ac 1 -c:a pcm_s16le -f wav output.wav
+```
+
+`ffmpeg` が利用できない場合も通常の WAV、LAB、SBV2、MFA 出力は継続します。この状態は `manifest.json` の `julius.status` と各 `labels.jsonl` の `julius.status` に `not_available` として記録します。変換に失敗した場合は `rejects.jsonl` の `julius_ffmpeg` に記録し、`--strict` 指定時だけ処理を停止します。
+
+Julius 用派生 WAV の生成状態は `manifest.json` で確認できます。
+
+- `generated`: 全サンプルの派生 WAV を生成済み
+- `failed`: `ffmpeg` は利用できたが、一部の変換に失敗
+- `not_available`: `ffmpeg` が PATH に存在しない
+
 読みの復元元は VPP の `sentence-list[].tokens[].syl[].s` です。`jp_g2p` で読みを再推定する処理は行いません。
+
+### Julius phone labels
+
+`jp_g2p` の SBV2 phone 列を、Julius の語彙・alignment 入力用の空白区切り列へ変換します。
+
+```text
+dataset/julius/speed_0.750/phones/b000_v003.txt
+silB e q sp s o sp silE
+```
+
+変換規則は次の通りです。
+
+- SBV2 の先頭・末尾 `_` → `silB`・`silE`
+- `cl`・`ッ` → `q`
+- `ー` → `:`
+- `pau`、句読点・区切り記号 → `sp`
+- その他の音素は Julius の phone 名としてそのまま保持
+
+各 utterance の `labels.jsonl` に `julius.phone_status`、`phones_path`、`phones`、`phone_line`、`lexical_phone_line` を保存します。`phone_status=failed` の場合は `phone_error` と `rejects.jsonl` の `julius_phone_conversion` を確認してください。Julius phone 列は `ffmpeg` がなくても生成されます。
 
 ### `labels.jsonl`
 
@@ -194,6 +251,7 @@ dataset/
 - `sbv2`: normalized text、phones、tones、word2ph
 - `mfa`: `.lab` の相対パス、連結カタカナ、pause 数、警告
 - `phone_labels`: VPP 音素・runtime duration・accent・intonation の対応
+- `julius`: 派生 WAV/LAB の状態と phone sequence の相対パス・変換後列
 - `runtime`: VOICEPEAK edit response の取得状態
 
 ### `metadata.json`
@@ -214,6 +272,53 @@ MFA 用の全 utterance 情報をまとめたファイルです。
 ### `rejects.jsonl`
 
 `--strict` なしで処理を継続した場合の synthesis / edit response エラーを保存します。
+
+## GitHub Actionsリリース
+
+`tag` は `Cargo.toml` の version と一致している必要があります。現在の version では `v0.1.0` または `0.1.0` を使用します。`-rc.1` のような suffix は prerelease として扱われます。
+`v*` または数字で始まる tag を push すると、`.github/workflows/release.yml` が Windows x64 向けリリースを作成します。
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+CI は次を順番に実行します。
+
+1. `generate_voice_from_voicepeak.exe` を `cargo build --locked --release` でビルド
+2. [Rumia-Channel/julius](https://github.com/Rumia-Channel/julius) を取得し、MinGW で Windows 用 Julius とツール群をビルド
+3. [julius-speech/grammar-kit](https://github.com/julius-speech/grammar-kit) から日本語音響モデル、HMM list、サンプルデータを取得
+4. すべてを `generate_voice_from_voicepeak_windows_x64_<tag>.zip` にまとめて GitHub Release へ添付
+
+Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
+```text
+generate_voice_from_voicepeak/
+├─ generate_voice_from_voicepeak.exe
+├─ README.md
+└─ julius/
+   ├─ BUILD-INFO.txt
+   ├─ JULIUS-LICENSE
+   ├─ bin/
+   │  ├─ julius.exe
+   │  ├─ julius-simple.exe
+   │  ├─ mkbingram.exe
+   │  └─ *.exe / *.dll
+   └─ grammar-kit/
+      ├─ model/phone_m/
+      │  ├─ hmmdefs_ptm_gid.binhmm
+      │  └─ logicalTri
+      └─ SampleGrammars/
+```
+
+同梱した Julius を直接実行する場合は、grammar-kit を current directory にして設定ファイルの相対パスを保ちます。
+
+```powershell
+Push-Location .\julius\grammar-kit
+..\bin\julius.exe -C .\hmm_ptm.jconf -input rawfile -filelist .\files.txt
+Pop-Location
+```
+
+このアプリのデータ生成では、Julius 用 WAV 変換に `ffmpeg` を使用します。`ffmpeg` はリリース zip には含めず、PATH から検出します。未導入の場合も通常の WAV、LAB、SBV2、MFA、phone列の生成は継続します。
 
 ## MFA 3.4.1 + PostgreSQL
 

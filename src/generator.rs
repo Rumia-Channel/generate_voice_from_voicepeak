@@ -8,6 +8,7 @@ use vpsdk::vpp::ProjectFile;
 use vpsdk::{EditResponsePayload, PipeSession, PlaybackPayload};
 
 use crate::config::{Config, SPEED_VALUES};
+use crate::julius::{FfmpegInfo, convert_wav, prepare_output, sbv2_to_julius};
 use crate::mfa::{build_mfa_utterance, write_dictionary_artifacts};
 use crate::models::RuntimeVoice;
 use crate::output::{SpeedWriter, speed_group_index, write_reject};
@@ -60,6 +61,20 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
     let project = ProjectFile::from_path(&config.vpp_path)?;
     let source_bytes = fs::read(&config.vpp_path)?;
     let source_sha256 = hex_sha256(&source_bytes);
+    let ffmpeg = FfmpegInfo::detect();
+    if ffmpeg.available {
+        println!(
+            "julius_ffmpeg=available version={}",
+            ffmpeg.version.as_deref().unwrap_or("unknown")
+        );
+    } else {
+        println!(
+            "julius_ffmpeg=not_available reason={}",
+            ffmpeg.error.as_deref().unwrap_or("unknown")
+        );
+    }
+    let julius_output_root = config.output_dir.join("julius");
+    prepare_output(&julius_output_root, &SPEED_VALUES)?;
 
     let mut speed_writers = SPEED_VALUES
         .iter()
@@ -85,6 +100,10 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
     let block_count = selected_blocks.len();
     let mut generated = 0usize;
     let mut failed = 0usize;
+    let mut julius_generated = 0usize;
+    let mut julius_failed = 0usize;
+    let mut julius_phones_generated = 0usize;
+    let mut julius_phones_failed = 0usize;
     let mut mfa_records = Vec::new();
     let mut mfa_dictionary_words = BTreeSet::new();
     let mut mfa_pause_token_count = 0usize;
@@ -113,6 +132,34 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                 .root
                 .join("wav")
                 .join(format!("{sample_id}.wav"));
+            let speed_directory = format!("speed_{:.3}", variant.speed);
+            let julius_phone_rel_path = format!("julius/{speed_directory}/phones/{sample_id}.txt");
+            let julius_phone_path = julius_output_root
+                .join(&speed_directory)
+                .join("phones")
+                .join(format!("{sample_id}.txt"));
+            let mut julius_phone_error = None;
+            let julius_phones = match sbv2_to_julius(&sbv2) {
+                Ok(sequence) => {
+                    fs::write(&julius_phone_path, format!("{}\n", sequence.line()))?;
+                    julius_phones_generated += 1;
+                    Some(sequence)
+                }
+                Err(error) => {
+                    julius_phones_failed += 1;
+                    julius_phone_error = Some(error.clone());
+                    write_reject(
+                        &mut speed_writers[speed_index].rejects,
+                        &sample_id,
+                        "julius_phone_conversion",
+                        &error,
+                    )?;
+                    if config.strict {
+                        return Err(error.into());
+                    }
+                    None
+                }
+            };
 
             let audio = match session.synthesize_payload(&payload) {
                 Ok(audio) => Ok(audio),
@@ -134,6 +181,10 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             let audio = match audio {
                 Ok(audio) => audio,
                 Err(error) => {
+                    if julius_phones.is_some() {
+                        let _ = fs::remove_file(&julius_phone_path);
+                        julius_phones_generated -= 1;
+                    }
                     failed += 1;
                     speed_writers[speed_index].failed += 1;
                     write_reject(
@@ -153,8 +204,81 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                 audio_path.with_extension("lab"),
                 format!("{}\n", mfa_utterance.katakana),
             )?;
+            let mut julius_record = if ffmpeg.available {
+                let julius_audio_rel_path = format!("julius/{speed_directory}/wav/{sample_id}.wav");
+                let julius_lab_rel_path = format!("julius/{speed_directory}/wav/{sample_id}.lab");
+                let julius_audio_path = julius_output_root
+                    .join(&speed_directory)
+                    .join("wav")
+                    .join(format!("{sample_id}.wav"));
+                let julius_lab_path = julius_audio_path.with_extension("lab");
+                let conversion =
+                    convert_wav(&ffmpeg, &audio_path, &julius_audio_path).and_then(|_| {
+                        fs::write(&julius_lab_path, format!("{}\n", mfa_utterance.katakana))
+                            .map_err(|error| format!("write Julius LAB failed: {error}"))
+                    });
+                match conversion {
+                    Ok(()) => {
+                        julius_generated += 1;
+                        json!({
+                            "status": "generated",
+                            "audio_path": julius_audio_rel_path,
+                            "lab_path": julius_lab_rel_path,
+                            "sample_rate": 16_000,
+                            "channels": 1,
+                            "sample_format": "s16le",
+                        })
+                    }
+                    Err(error) => {
+                        julius_failed += 1;
+                        failed += 1;
+                        speed_writers[speed_index].failed += 1;
+                        write_reject(
+                            &mut speed_writers[speed_index].rejects,
+                            &sample_id,
+                            "julius_ffmpeg",
+                            &error,
+                        )?;
+                        if config.strict {
+                            return Err(error.into());
+                        }
+                        json!({
+                            "status": "failed",
+                            "error": error,
+                            "sample_rate": 16_000,
+                            "channels": 1,
+                            "sample_format": "s16le",
+                        })
+                    }
+                }
+            } else {
+                json!({
+                    "status": "not_available",
+                    "error": ffmpeg.error.clone(),
+                    "sample_rate": 16_000,
+                    "channels": 1,
+                    "sample_format": "s16le",
+                })
+            };
+            let julius_object = julius_record
+                .as_object_mut()
+                .ok_or("Julius metadata must be a JSON object")?;
+            if let Some(sequence) = julius_phones.as_ref() {
+                julius_object.insert("phone_status".to_string(), json!("generated"));
+                julius_object.insert("phones_path".to_string(), json!(julius_phone_rel_path));
+                julius_object.insert("phones".to_string(), json!(&sequence.phones));
+                julius_object.insert("phone_line".to_string(), json!(sequence.line()));
+                julius_object.insert(
+                    "lexical_phone_line".to_string(),
+                    json!(sequence.lexical_line()),
+                );
+            } else {
+                julius_object.insert("phone_status".to_string(), json!("failed"));
+                julius_object.insert("phone_error".to_string(), json!(julius_phone_error));
+            }
 
             let request_value = payload.to_payload();
+
             let edit_tokens = match values_to_edit_tokens(&payload.tokens) {
                 Ok(tokens) => tokens,
                 Err(error) => {
@@ -211,6 +335,7 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                     "duration_sec": audio.duration_secs(),
                     "vpp_export_sample_rate": project.project.export.sample_rate,
                 },
+                "julius": julius_record,
                 "synthesis": {
                     "text": payload.text,
                     "narrator": payload.narrator,
@@ -282,7 +407,7 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                 .iter()
                 .filter(|token| token.pause)
                 .count();
-            let speed_directory = format!("speed_{:.3}", variant.speed);
+
             mfa_records.push(json!({
                 "utterance_id": sample_id,
                 "audio": format!("{speed_directory}/{audio_rel_path}"),
@@ -338,11 +463,41 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             "variants_per_speed": config.variants_per_block / SPEED_VALUES.len(),
             "generated": generated,
             "failed": failed,
+            "julius_generated": julius_generated,
+            "julius_failed": julius_failed,
             "mfa_pause_tokens": mfa_pause_token_count,
             "mfa_warnings": mfa_warning_count,
             "mfa_dictionary_words": mfa_dictionary_words.len(),
+            "julius_phones_generated": julius_phones_generated,
+            "julius_phones_failed": julius_phones_failed,
         },
         "speed_groups": speed_groups,
+        "julius": {
+            "status": if !ffmpeg.available && julius_phones_failed == 0 {
+                "not_available"
+            } else if julius_failed > 0 || julius_phones_failed > 0 {
+                "failed"
+            } else {
+                "generated"
+            },
+            "ffmpeg": {
+                "command": ffmpeg.command,
+                "status": ffmpeg.status(),
+                "version": ffmpeg.version,
+                "error": ffmpeg.error,
+            },
+            "audio_pattern": "julius/speed_*/wav/{utterance_id}.wav",
+            "lab_pattern": "julius/speed_*/wav/{utterance_id}.lab",
+            "phones_pattern": "julius/speed_*/phones/{utterance_id}.txt",
+            "phones_format": "one space-separated Julius phone line including silB and silE",
+            "sample_rate": 16_000,
+            "channels": 1,
+            "sample_format": "s16le",
+            "generated": julius_generated,
+            "failed": julius_failed,
+            "phones_generated": julius_phones_generated,
+            "phones_failed": julius_phones_failed,
+        },
         "mfa": {
             "metadata_path": "metadata.json",
             "lab_pattern": "speed_*/wav/{utterance_id}.lab",
@@ -367,6 +522,7 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             "SBV2-compatible phones, tones, and word2ph are converted directly from VPP tokens.",
             "The complete playback payload is stored in each speed directory's requests.jsonl for reproducibility.",
             "MFA lab text preserves sentence punctuation and Katakana geminate markers from VPP.",
+            "SBV2 guards and pause punctuation are converted to Julius silB, silE, and sp in julius/speed_*/phones/*.txt.",
         ],
     });
     fs::write(

@@ -1,11 +1,13 @@
-use serde_json::{Map, Value, json};
-use vpsdk::SynthesisParams;
-
+use super::julius::{FfmpegInfo, convert_wav, sbv2_to_julius};
 use super::mfa::build_mfa_utterance_from_sentences;
-use super::models::Variant;
+use super::models::{Sbv2Equivalent, Variant};
 use super::sbv2::{sbv2_from_vpp, symbols_match};
 use super::util::hex_sha256;
 use super::voicepeak::mutate_token_values;
+use serde_json::{Map, json};
+use std::fs;
+use std::path::Path;
+use vpsdk::SynthesisParams;
 
 #[test]
 fn maps_voicepeak_phone_symbols_to_sbv2() {
@@ -76,6 +78,81 @@ fn converts_vpp_tokens_to_sbv2_compatible_data() {
         output.word2ph.len(),
         output.normalized_text.chars().count() + 2
     );
+}
+
+#[test]
+fn converts_sbv2_phones_to_julius_format() {
+    let sbv2 = Sbv2Equivalent {
+        normalized_text: "えっ、そう。".to_string(),
+        phones: vec![
+            "_".to_string(),
+            "e".to_string(),
+            "q".to_string(),
+            ",".to_string(),
+            "s".to_string(),
+            "o".to_string(),
+            ".".to_string(),
+            "_".to_string(),
+        ],
+        tones: vec![0; 8],
+        word2ph: vec![1; 8],
+    };
+
+    let output = sbv2_to_julius(&sbv2).expect("Julius conversion");
+    assert_eq!(
+        output.phones,
+        vec![
+            "silB".to_string(),
+            "e".to_string(),
+            "q".to_string(),
+            "sp".to_string(),
+            "s".to_string(),
+            "o".to_string(),
+            "sp".to_string(),
+            "silE".to_string(),
+        ]
+    );
+    assert_eq!(output.line(), "silB e q sp s o sp silE");
+    assert_eq!(output.lexical_line(), "e q sp s o sp");
+}
+
+#[test]
+fn converts_jp_g2p_special_phone_aliases_for_julius() {
+    let sbv2 = Sbv2Equivalent {
+        normalized_text: "ッー".to_string(),
+        phones: vec![
+            "_".to_string(),
+            "cl".to_string(),
+            "ー".to_string(),
+            "_".to_string(),
+        ],
+        tones: vec![0; 4],
+        word2ph: vec![1; 4],
+    };
+
+    let output = sbv2_to_julius(&sbv2).expect("Julius conversion");
+    assert_eq!(
+        output.phones,
+        vec![
+            "silB".to_string(),
+            "q".to_string(),
+            ":".to_string(),
+            "silE".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn rejects_sbv2_without_julius_boundary_guards() {
+    let sbv2 = Sbv2Equivalent {
+        normalized_text: "え".to_string(),
+        phones: vec!["e".to_string(), "_".to_string()],
+        tones: vec![0; 2],
+        word2ph: vec![1; 2],
+    };
+
+    let error = sbv2_to_julius(&sbv2).expect_err("missing leading guard");
+    assert!(error.contains("start with '_'"));
 }
 
 #[test]
@@ -183,4 +260,60 @@ fn computes_sha256_for_manifest() {
         hex_sha256(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
+}
+
+#[test]
+fn converts_wav_to_julius_format_when_ffmpeg_is_available() {
+    let ffmpeg = FfmpegInfo::detect();
+    if !ffmpeg.available {
+        return;
+    }
+
+    let root = std::env::temp_dir().join(format!(
+        "generate_voice_from_voicepeak-julius-test-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create temporary test directory");
+    let source = root.join("source.wav");
+    let destination = root.join("julius.wav");
+    write_test_wav(&source);
+
+    convert_wav(&ffmpeg, &source, &destination).expect("ffmpeg conversion");
+    let bytes = fs::read(&destination).expect("read converted WAV");
+    assert_eq!(&bytes[0..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WAVE");
+    assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 1);
+    assert_eq!(
+        u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+        16_000
+    );
+    assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
+
+    fs::remove_dir_all(root).expect("remove temporary test directory");
+}
+
+fn write_test_wav(path: &Path) {
+    let samples = [0i16, 1000, -1000, 500, -500, 250, -250, 0];
+    let mut data = Vec::with_capacity(samples.len() * 2);
+    for sample in samples {
+        data.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    let data_len = data.len() as u32;
+    let mut wav = Vec::with_capacity(44 + data.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes());
+    wav.extend_from_slice(&8_000u32.to_le_bytes());
+    wav.extend_from_slice(&(8_000u32 * 2 * 2).to_le_bytes());
+    wav.extend_from_slice(&(2u16 * 2).to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&data);
+    fs::write(path, wav).expect("write test WAV");
 }
