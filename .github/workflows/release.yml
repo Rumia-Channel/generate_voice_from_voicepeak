@@ -58,6 +58,10 @@ jobs:
         with:
           key: release-windows-x64
 
+      - name: Test Julius transcript conversion
+        shell: pwsh
+        run: .\scripts\test-julius-transcript.ps1
+
       - name: Build generate_voice_from_voicepeak
         run: cargo build --locked --release
 
@@ -131,6 +135,7 @@ jobs:
             $requiredEntries = @(
               "generate_voice_from_voicepeak/generate_from_vpp.bat"
               "generate_voice_from_voicepeak/align_julius.ps1"
+              "generate_voice_from_voicepeak/scripts/julius-transcript.ps1"
               "generate_voice_from_voicepeak/third_party/segmentation-kit/segment_julius.pl"
               "generate_voice_from_voicepeak/third_party/segmentation-kit/License.md"
             )
