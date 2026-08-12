@@ -83,6 +83,12 @@ try {
         Copy-Item -Path $sourcePath -Destination (Join-Path $packageDir $packageFile)
     }
 
+    $scriptsPackageDir = Join-Path $packageDir "scripts"
+    New-Item -ItemType Directory -Force -Path $scriptsPackageDir | Out-Null
+    Copy-Item `
+        -Path (Resolve-RequiredFile -Path (Join-Path $repoRoot "scripts\julius-transcript.ps1") -Description "Julius transcript helper") `
+        -Destination (Join-Path $scriptsPackageDir "julius-transcript.ps1")
+
     $segmentationKitSource = Resolve-RequiredDirectory `
         -Path (Join-Path $repoRoot "third_party\segmentation-kit") `
         -Description "Julius segmentation-kit helper"
