@@ -119,15 +119,16 @@ fn converts_sbv2_phones_to_julius_format() {
 #[test]
 fn converts_jp_g2p_special_phone_aliases_for_julius() {
     let sbv2 = Sbv2Equivalent {
-        normalized_text: "ッー".to_string(),
+        normalized_text: "ラー".to_string(),
         phones: vec![
             "_".to_string(),
-            "cl".to_string(),
+            "r".to_string(),
+            "a".to_string(),
             "ー".to_string(),
             "_".to_string(),
         ],
-        tones: vec![0; 4],
-        word2ph: vec![1; 4],
+        tones: vec![0; 5],
+        word2ph: vec![1; 5],
     };
 
     let output = sbv2_to_julius(&sbv2).expect("Julius conversion");
@@ -135,11 +136,34 @@ fn converts_jp_g2p_special_phone_aliases_for_julius() {
         output.phones,
         vec![
             "silB".to_string(),
-            "q".to_string(),
-            ":".to_string(),
+            "r".to_string(),
+            "a".to_string(),
+            "a:".to_string(),
             "silE".to_string(),
         ]
     );
+    assert_eq!(output.line(), "silB r a a: silE");
+}
+
+#[test]
+fn converts_small_vowel_and_long_vowel_for_julius() {
+    let sbv2 = Sbv2Equivalent {
+        normalized_text: "ひぇーん".to_string(),
+        phones: vec![
+            "_".to_string(),
+            "h".to_string(),
+            "i".to_string(),
+            "ぇ".to_string(),
+            "ー".to_string(),
+            "N".to_string(),
+            "_".to_string(),
+        ],
+        tones: vec![0; 7],
+        word2ph: vec![1; 7],
+    };
+
+    let output = sbv2_to_julius(&sbv2).expect("Julius conversion");
+    assert_eq!(output.line(), "silB h i e e: N silE");
 }
 
 #[test]

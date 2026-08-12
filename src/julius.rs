@@ -44,13 +44,14 @@ pub(crate) fn sbv2_to_julius(input: &Sbv2Equivalent) -> Result<JuliusPhoneSequen
             phones.push("silE".to_string());
             continue;
         }
-        phones.push(julius_phone(phone)?);
+        let previous = phones.last().map(String::as_str);
+        phones.push(julius_phone(phone, previous)?);
     }
 
     Ok(JuliusPhoneSequence { phones })
 }
 
-fn julius_phone(phone: &str) -> Result<String, String> {
+fn julius_phone(phone: &str, previous: Option<&str>) -> Result<String, String> {
     if phone.is_empty() || phone.chars().any(char::is_whitespace) {
         return Err(format!("invalid Julius phone token: {phone:?}"));
     }
@@ -59,14 +60,24 @@ fn julius_phone(phone: &str) -> Result<String, String> {
     }
 
     let mapped = match phone {
-        "cl" | "ッ" => "q",
-        "ー" => ":",
-        "pau" | "sp" => "sp",
+        "cl" | "ッ" => "q".to_string(),
+        "ぁ" => "a".to_string(),
+        "ぃ" => "i".to_string(),
+        "ぅ" => "u".to_string(),
+        "ぇ" => "e".to_string(),
+        "ぉ" => "o".to_string(),
+        "ー" => {
+            let vowel = previous
+                .filter(|value| matches!(*value, "a" | "i" | "u" | "e" | "o"))
+                .ok_or_else(|| "Julius long-vowel phone requires a preceding vowel".to_string())?;
+            format!("{vowel}:")
+        }
+        "pau" | "sp" => "sp".to_string(),
         "、" | "。" | "，" | "," | "！" | "!" | "？" | "?" | "・" | "；" | ";" | "…" | "'"
-        | "-" | "." => "sp",
-        _ => phone,
+        | "-" | "." => "sp".to_string(),
+        _ => phone.to_string(),
     };
-    Ok(mapped.to_string())
+    Ok(mapped)
 }
 
 #[derive(Clone, Debug)]
