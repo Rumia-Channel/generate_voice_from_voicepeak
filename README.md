@@ -102,7 +102,6 @@ generate_from_vpp.bat "C:\path\to\voicepeak.vpp" "D:\datasets\voicepeak"
 ```
 
 BAT は `generate_voice_from_voicepeak.exe`、`julius\bin\julius.exe`、日本語モノフォン音響モデルを BAT 自身のディレクトリから解決します。`ffmpeg.exe` は PATH に必要です。VOICEPEAK は通常のインストール場所から VPSDK が検出します。
-開発ツリーで Julius を別の場所に置く場合は、`JULIUS_ROOT` 環境変数で上書きできます。
 
 `--variants 15` は、1 block あたり 15 variant を生成します。速度グループは 5 種類なので、各速度に 3 variant ずつ割り当てられます。
 
@@ -322,13 +321,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-CI は次を順番に実行します。
-
-1. `generate_voice_from_voicepeak.exe` を `cargo build --locked --release` でビルド
-2. [Rumia-Channel/julius](https://github.com/Rumia-Channel/julius) を取得し、CMake の `x64-windows-ninja` preset と MSVC x64 で Windows 用 Julius とツール群をビルド
-3. [julius-speech/grammar-kit](https://github.com/julius-speech/grammar-kit) から日本語音響モデル、HMM list、サンプルデータを取得
-4. 生成ZIPに `generate_from_vpp.bat` と `align_julius.ps1` が含まれることを検査
-5. すべてを `generate_voice_from_voicepeak_windows_x64_<tag>.zip` にまとめて GitHub Release へ添付
+CI はリリースZIPを生成し、GitHub Release に添付します。
 
 Julius は MinGW ではなく MSVC ベースでビルドし、vcpkg の zlib は静的リンクします。Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
 ```text
