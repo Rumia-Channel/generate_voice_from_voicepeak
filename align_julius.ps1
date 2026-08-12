@@ -10,6 +10,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$transcriptHelper = Join-Path $PSScriptRoot "scripts\julius-transcript.ps1"
+if (-not (Test-Path -LiteralPath $transcriptHelper -PathType Leaf)) {
+    throw "Julius transcript helper was not found: $transcriptHelper"
+}
+. $transcriptHelper
+
 function Resolve-ExistingFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -35,67 +41,6 @@ function Resolve-Perl {
         throw "Perl is required by Julius segmentation-kit but was not found on PATH."
     }
     return $command.Source
-}
-
-function Test-IsPausePunctuation {
-    param([char]$Character)
-    return "。、，,！？!?・：:；;「」『』（）()….".Contains([string]$Character)
-}
-
-function Convert-KatakanaCharToHiragana {
-    param([char]$Character)
-
-    $code = [int][char]$Character
-    if ($code -eq 0x30F4) {
-        # The upstream yomi2voca() uses the historical decomposed spelling う゛.
-        return ([string][char]0x3046) + ([string][char]0x309B)
-    }
-    if ($code -ge 0x30A1 -and $code -le 0x30F6) {
-        return [string][char]($code - 0x60)
-    }
-    return [string]$Character
-}
-
-function Convert-VppKatakanaToJuliusTranscript {
-    param([Parameter(Mandatory = $true)][string]$Katakana)
-
-    $parts = New-Object System.Collections.Generic.List[string]
-    $current = New-Object System.Text.StringBuilder
-    $pendingPause = $false
-
-    foreach ($character in $Katakana.ToCharArray()) {
-        if (Test-IsPausePunctuation -Character $character) {
-            if ($current.Length -gt 0) {
-                $parts.Add($current.ToString())
-                [void]$current.Clear()
-            }
-            if ($parts.Count -gt 0) {
-                $pendingPause = $true
-            }
-            continue
-        }
-
-        if ([char]::IsWhiteSpace($character)) {
-            continue
-        }
-
-        if ($pendingPause) {
-            if ($parts.Count -gt 0 -and $parts[$parts.Count - 1] -ne "sp") {
-                $parts.Add("sp")
-            }
-            $pendingPause = $false
-        }
-        [void]$current.Append((Convert-KatakanaCharToHiragana -Character $character))
-    }
-
-    if ($current.Length -gt 0) {
-        $parts.Add($current.ToString())
-    }
-    while ($parts.Count -gt 0 -and $parts[$parts.Count - 1] -eq "sp") {
-        $parts.RemoveAt($parts.Count - 1)
-    }
-
-    return ($parts -join " ")
 }
 
 $resolvedDatasetRoot = (Resolve-Path -LiteralPath $DatasetRoot).Path
