@@ -20,16 +20,11 @@ impl SpeedWriter {
     pub(crate) fn new(output_dir: &Path, speed: f64) -> Result<Self, Box<dyn Error>> {
         let root = output_dir.join(format!("speed_{speed:.3}"));
         let wav_dir = root.join("wav");
+        let julius_dir = root.join("julius");
         fs::create_dir_all(&wav_dir)?;
-        for entry in fs::read_dir(&wav_dir)? {
-            let path = entry?.path();
-            if matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("wav" | "lab")
-            ) {
-                fs::remove_file(path)?;
-            }
-        }
+        fs::create_dir_all(&julius_dir)?;
+        clear_generated_files(&wav_dir, &["wav", "lab"])?;
+        clear_generated_files(&julius_dir, &["wav", "txt", "lab", "log", "dfa", "dict"])?;
         Ok(Self {
             speed,
             labels: BufWriter::new(File::create(root.join("labels.jsonl"))?),
@@ -41,6 +36,17 @@ impl SpeedWriter {
             failed: 0,
         })
     }
+}
+
+fn clear_generated_files(directory: &Path, extensions: &[&str]) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        let extension = path.extension().and_then(|value| value.to_str());
+        if extension.is_some_and(|extension| extensions.contains(&extension)) {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn speed_group_index(speed: f64) -> Result<usize, Box<dyn Error>> {
