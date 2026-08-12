@@ -31,16 +31,31 @@ if errorlevel 1 (
     exit /b 4
 )
 
+where perl.exe >nul 2>&1
+if errorlevel 1 (
+    where perl >nul 2>&1
+    if errorlevel 1 (
+        echo ERROR: Perl is required by the official Julius segmentation-kit and was not found on PATH. 1>&2
+        exit /b 5
+    )
+)
+
 set "ALIGNER=%SCRIPT_DIR%align_julius.ps1"
 if not exist "%ALIGNER%" (
     echo ERROR: align_julius.ps1 was not found next to this BAT. 1>&2
-    exit /b 5
+    exit /b 6
+)
+
+set "SEGMENTER=%SCRIPT_DIR%third_party\segmentation-kit\segment_julius.pl"
+if not exist "%SEGMENTER%" (
+    echo ERROR: Julius segmentation-kit script was not found: %SEGMENTER% 1>&2
+    exit /b 7
 )
 
 set "POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%POWERSHELL%" (
     echo ERROR: Windows PowerShell was not found. 1>&2
-    exit /b 6
+    exit /b 8
 )
 if "%JULIUS_ROOT%"=="" set "JULIUS_ROOT=%SCRIPT_DIR%julius"
 
@@ -51,7 +66,7 @@ if errorlevel 1 (
     exit /b 10
 )
 
-echo [2/2] Running Julius forced phoneme alignment...
+echo [2/2] Running Julius segmentation-kit forced phoneme alignment...
 "%POWERSHELL%" -NoProfile -ExecutionPolicy Bypass -File "%ALIGNER%" -DatasetRoot "%OUTPUT_DIR%" -JuliusRoot "%JULIUS_ROOT%"
 if errorlevel 1 (
     echo ERROR: Julius alignment failed. Check *.julius.log under the output directory. 1>&2

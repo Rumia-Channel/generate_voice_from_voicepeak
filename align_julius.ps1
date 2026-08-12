@@ -10,6 +10,12 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$transcriptHelper = Join-Path $PSScriptRoot "scripts\julius-transcript.ps1"
+if (-not (Test-Path -LiteralPath $transcriptHelper -PathType Leaf)) {
+    throw "Julius transcript helper was not found: $transcriptHelper"
+}
+. $transcriptHelper
+
 function Resolve-ExistingFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -26,130 +32,20 @@ function Resolve-ExistingFile {
     throw "$Description was not found. Checked: $($Candidates -join ', ')"
 }
 
-function Write-SingleWordGrammar {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$DfaPath,
-        [Parameter(Mandatory = $true)]
-        [string]$DictionaryPath,
-        [Parameter(Mandatory = $true)]
-        [string]$PhoneLine
-    )
-
-    # This is the one-word linear DFA used by segmentation-kit. The dictionary
-    # entry contains the complete known Julius phone sequence.
-    @(
-        "0 0 1 0 1"
-        "1 -1 -1 1 0"
-    ) | Set-Content -LiteralPath $DfaPath -Encoding ascii
-    "0 [w_0] $PhoneLine" | Set-Content -LiteralPath $DictionaryPath -Encoding ascii
-}
-
-function Start-JuliusProcess {
-    param(
-        [string]$Executable,
-        [string]$Hmmdefs,
-        [string]$DfaPath,
-        [string]$DictionaryPath,
-        [string]$WavePath,
-        [string]$LogPath
-    )
-
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = $Executable
-    $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($Executable)
-    $startInfo.Arguments = '-h "' + $Hmmdefs + '" -dfa "' + $DfaPath + '" -v "' + $DictionaryPath + '" -palign -input file'
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
-    try {
-        [void]$process.Start()
-        $process.StandardInput.WriteLine($WavePath)
-        $process.StandardInput.Close()
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-
-        $log = $stdout
-        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
-            $log += "`r`n--- stderr ---`r`n$stderr"
-        }
-        [System.IO.File]::WriteAllText($LogPath, $log, (New-Object System.Text.UTF8Encoding($false)))
-
-        if ($process.ExitCode -ne 0) {
-            throw "Julius exited with status $($process.ExitCode). See $LogPath"
-        }
-        return $stdout
+function Resolve-Perl {
+    $command = Get-Command perl.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        $command = Get-Command perl -ErrorAction SilentlyContinue
     }
-    finally {
-        $process.Dispose()
+    if ($null -eq $command) {
+        throw "Perl is required by Julius segmentation-kit but was not found on PATH."
     }
-}
-
-function Convert-ToAlignmentLab {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$JuliusOutput,
-        [Parameter(Mandatory = $true)]
-        [string]$LabPath
-    )
-
-    $insideAlignment = $false
-    $labLines = New-Object System.Collections.Generic.List[string]
-    foreach ($line in ($JuliusOutput -split "`r?`n")) {
-        if ($line -match 'begin forced alignment') {
-            $insideAlignment = $true
-            continue
-        }
-        if ($line -match 'end forced alignment') {
-            $insideAlignment = $false
-            break
-        }
-        if (-not $insideAlignment) {
-            continue
-        }
-
-        if ($line -match '^\[\s*(\d+)\s+(\d+)\]\s*[-+0-9.]+\s*(.+?)\s*$') {
-            $beginFrame = [int]$Matches[1]
-            $endFrame = [int]$Matches[2]
-            $unit = $Matches[3].Trim()
-            if ([string]::IsNullOrWhiteSpace($unit)) {
-                continue
-            }
-
-            $beginTime = $beginFrame * 0.01
-            if ($beginFrame -ne 0) {
-                $beginTime += 0.0125
-            }
-            $endTime = ($endFrame + 1) * 0.01 + 0.0125
-            $labLines.Add([string]::Format(
-                [System.Globalization.CultureInfo]::InvariantCulture,
-                "{0:F7} {1:F7} {2}",
-                $beginTime,
-                $endTime,
-                $unit
-            ))
-        }
-    }
-
-    if ($labLines.Count -eq 0) {
-        throw "Julius output did not contain a forced phoneme alignment. See $([System.IO.Path]::ChangeExtension($LabPath, '.julius.log'))"
-    }
-
-    [System.IO.File]::WriteAllLines(
-        $LabPath,
-        [string[]]$labLines,
-        (New-Object System.Text.UTF8Encoding($false))
-    )
+    return $command.Source
 }
 
 $resolvedDatasetRoot = (Resolve-Path -LiteralPath $DatasetRoot).Path
 $resolvedJuliusRoot = (Resolve-Path -LiteralPath $JuliusRoot).Path
+$perl = Resolve-Perl
 $juliusExecutable = Resolve-ExistingFile `
     -Candidates @(
         (Join-Path $resolvedJuliusRoot "bin\julius.exe"),
@@ -162,56 +58,123 @@ $hmmdefs = Resolve-ExistingFile `
         (Join-Path $resolvedJuliusRoot "model\phone_m\hmmdefs_monof_mix16_gid.binhmm")
     ) `
     -Description "Julius monophone acoustic model"
+$segmentationScript = Resolve-ExistingFile `
+    -Candidates @(
+        (Join-Path $PSScriptRoot "third_party\segmentation-kit\segment_julius.pl"),
+        (Join-Path $resolvedJuliusRoot "segmentation-kit\segment_julius.pl")
+    ) `
+    -Description "Julius segmentation-kit script"
 
 $juliusDatasetRoot = Join-Path $resolvedDatasetRoot "julius"
 if (-not (Test-Path -LiteralPath $juliusDatasetRoot -PathType Container)) {
     throw "Julius dataset directory was not found: $juliusDatasetRoot"
 }
 
-$wavFiles = @(Get-ChildItem -LiteralPath $juliusDatasetRoot -Recurse -File -Filter "*.wav" | Sort-Object FullName)
-if ($wavFiles.Count -eq 0) {
-    throw "No Julius WAV files were found under $juliusDatasetRoot"
+$wavDirectories = @(Get-ChildItem -LiteralPath $juliusDatasetRoot -Directory -Recurse | Where-Object {
+    $_.Name -eq "wav"
+} | Sort-Object FullName)
+if ($wavDirectories.Count -eq 0) {
+    throw "No Julius WAV directories were found under $juliusDatasetRoot"
 }
+
+# Upstream segment_julius.pl uses fixed relative paths and a shell pipeline.
+# Run it against a simple staging tree so spaces in the user's dataset path do
+# not leak into that legacy command line.
+$kitRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("voicepeak-julius-segmentation-" + [guid]::NewGuid().ToString("N"))
+$kitBin = Join-Path $kitRoot "bin"
+$kitModels = Join-Path $kitRoot "models"
+$kitWav = Join-Path $kitRoot "wav"
+New-Item -ItemType Directory -Force -Path $kitBin, $kitModels, $kitWav | Out-Null
+Copy-Item -LiteralPath $juliusExecutable -Destination (Join-Path $kitBin "julius-4.3.1.exe") -Force
+Get-ChildItem -LiteralPath ([System.IO.Path]::GetDirectoryName($juliusExecutable)) -File -Filter "*.dll" | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $kitBin $_.Name) -Force
+}
+Copy-Item -LiteralPath $hmmdefs -Destination (Join-Path $kitModels "hmmdefs_monof_mix16_gid.binhmm") -Force
+Copy-Item -LiteralPath $segmentationScript -Destination (Join-Path $kitRoot "segment_julius.pl") -Force
 
 $failed = 0
 $aligned = 0
-foreach ($wavFile in $wavFiles) {
-    $speedDirectory = $wavFile.Directory.Parent.FullName
-    $phonesPath = Join-Path (Join-Path $speedDirectory "phones") ($wavFile.BaseName + ".txt")
-    $dfaPath = Join-Path $wavFile.Directory ($wavFile.BaseName + ".julius.dfa")
-    $dictionaryPath = Join-Path $wavFile.Directory ($wavFile.BaseName + ".julius.dict")
-    $logPath = Join-Path $wavFile.Directory ($wavFile.BaseName + ".julius.log")
-    $labPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
-
-    try {
-        if (-not (Test-Path -LiteralPath $phonesPath -PathType Leaf)) {
-            throw "Julius phone transcription was not found: $phonesPath"
-        }
-        $phoneLine = ([System.IO.File]::ReadAllText($phonesPath)).Trim()
-        if ([string]::IsNullOrWhiteSpace($phoneLine)) {
-            throw "Julius phone transcription is empty: $phonesPath"
+try {
+    foreach ($wavDirectory in $wavDirectories) {
+        Get-ChildItem -LiteralPath $kitWav -Force | Remove-Item -Recurse -Force
+        $wavFiles = @(Get-ChildItem -LiteralPath $wavDirectory.FullName -File -Filter "*.wav" | Sort-Object Name)
+        if ($wavFiles.Count -eq 0) {
+            continue
         }
 
-        Write-SingleWordGrammar -DfaPath $dfaPath -DictionaryPath $dictionaryPath -PhoneLine $phoneLine
-        $juliusOutput = Start-JuliusProcess `
-            -Executable $juliusExecutable `
-            -Hmmdefs $hmmdefs `
-            -DfaPath $dfaPath `
-            -DictionaryPath $dictionaryPath `
-            -WavePath $wavFile.FullName `
-            -LogPath $logPath
-        Convert-ToAlignmentLab -JuliusOutput $juliusOutput -LabPath $labPath
-        $aligned++
-        Write-Host ("aligned={0} lab={1}" -f $aligned, $labPath)
+        foreach ($wavFile in $wavFiles) {
+            $sourceLabPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
+            if (-not (Test-Path -LiteralPath $sourceLabPath -PathType Leaf)) {
+                throw "Pre-alignment VPP Katakana transcription was not found: $sourceLabPath"
+            }
+            $katakana = ([System.IO.File]::ReadAllText($sourceLabPath)).Trim()
+            if ([string]::IsNullOrWhiteSpace($katakana)) {
+                throw "Pre-alignment VPP Katakana transcription is empty: $sourceLabPath"
+            }
+            $transcript = Convert-VppKatakanaToJuliusTranscript -Katakana $katakana
+            if ([string]::IsNullOrWhiteSpace($transcript)) {
+                throw "Julius Hiragana transcription is empty: $sourceLabPath"
+            }
+
+            $stagedWav = Join-Path $kitWav ($wavFile.BaseName + ".wav")
+            $stagedTxt = Join-Path $kitWav ($wavFile.BaseName + ".txt")
+            Copy-Item -LiteralPath $wavFile.FullName -Destination $stagedWav -Force
+            [System.IO.File]::WriteAllText(
+                $stagedTxt,
+                $transcript + "`n",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+
+            # Keep the exact segmentation-kit input beside the source audio for
+            # reproducibility and manual inspection.
+            $datasetTxt = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".txt")
+            [System.IO.File]::WriteAllText(
+                $datasetTxt,
+                $transcript + "`n",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+        }
+
+        Push-Location $kitRoot
+        try {
+            & $perl ".\segment_julius.pl" ".\wav"
+            if ($LASTEXITCODE -ne 0) {
+                throw "segment_julius.pl exited with status $LASTEXITCODE for $($wavDirectory.FullName)"
+            }
+        }
+        finally {
+            Pop-Location
+        }
+
+        foreach ($wavFile in $wavFiles) {
+            $stagedLab = Join-Path $kitWav ($wavFile.BaseName + ".lab")
+            $stagedLog = Join-Path $kitWav ($wavFile.BaseName + ".log")
+            $destinationLab = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
+            $destinationLog = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".julius.log")
+
+            if (-not (Test-Path -LiteralPath $stagedLab -PathType Leaf)) {
+                $failed++
+                Write-Error "Julius did not generate an alignment LAB: $stagedLab"
+                continue
+            }
+            $lab = ([System.IO.File]::ReadAllText($stagedLab)).Trim()
+            if ([string]::IsNullOrWhiteSpace($lab) -or $lab -notmatch '^\d+\.\d+\s+\d+\.\d+\s+') {
+                $failed++
+                Write-Error "Julius generated an invalid or empty alignment LAB: $stagedLab"
+                continue
+            }
+
+            Copy-Item -LiteralPath $stagedLab -Destination $destinationLab -Force
+            if (Test-Path -LiteralPath $stagedLog -PathType Leaf) {
+                Copy-Item -LiteralPath $stagedLog -Destination $destinationLog -Force
+            }
+            $aligned++
+            Write-Host ("aligned={0} lab={1}" -f $aligned, $destinationLab)
+        }
     }
-    catch {
-        $failed++
-        $detail = ($_ | Out-String).Trim()
-        Write-Error ("Julius alignment failed for {0}: {1}`n{2}" -f $wavFile.FullName, $_.Exception.Message, $detail)
-    }
-    finally {
-        Remove-Item -LiteralPath $dfaPath, $dictionaryPath -Force -ErrorAction SilentlyContinue
-    }
+}
+finally {
+    Remove-Item -LiteralPath $kitRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 if ($failed -gt 0) {

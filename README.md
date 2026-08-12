@@ -2,7 +2,7 @@
 
 VOICEPEAK の VPP プロジェクトから、音声・VPP由来ラベル・SBV2互換情報・MFA用カタカナ転写を生成する Rust CLI です。
 
-主な処理は次の通りです。
+主な MFA 処理は次の通りです。
 
 ```text
 VPP
@@ -22,6 +22,20 @@ japanese_mfa acoustic model
 phone timing
 ```
 
+Julius は同じ VPP 確定読みを使い、公式 segmentation-kit の `yomi2voca()` に phone 変換を委譲します。
+
+```text
+VPP 確定カタカナ
+ ↓
+ひらがな化 + 内部句読点を sp 化
+ ↓
+segment_julius.pl / yomi2voca()
+ ↓
+Julius monophone acoustic model
+ ↓
+phone timing
+```
+
 SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネーション、VOICEPEAK の runtime 応答も `labels.jsonl` に保存します。
 
 ## 前提条件
@@ -32,7 +46,7 @@ SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネ
 - VOICEPEAK 本体
 - 解析対象の `.vpp` ファイル
 - MFA alignment を行う場合は MFA 3.4.1、PostgreSQL、日本語モデル
-- Julius forced alignment を BAT で行う場合は ffmpeg（PATH に必要）
+- Julius forced alignment を行う場合は ffmpeg と Perl（どちらも PATH に必要）
 
 このリポジトリの既定 VPP パスは次です。
 
@@ -81,9 +95,11 @@ cargo run --release -- `
 リリース ZIP に同梱される `generate_from_vpp.bat` は、VPP のパスだけを指定して次を順番に実行します。
 
 1. VOICEPEAK で音声を合成
-2. Julius 用 16 kHz WAV と phone 列を生成
-3. Julius で強制音素アライメントを実行
-4. `dataset\julius\speed_*\wav\*.lab` を時間付きラベルへ置換
+2. Julius 用 16 kHz WAV と VPP 確定カタカナ転写を生成
+3. 転写をひらがな + `sp` 形式へ変換
+4. 公式 Julius segmentation-kit の `yomi2voca()` で phone 化
+5. Julius で強制音素アライメントを実行
+6. `dataset\julius\speed_*\wav\*.lab` を時間付きラベルへ置換
 
 ```bat
 generate_from_vpp.bat "C:\path\to\voicepeak.vpp"
@@ -101,7 +117,7 @@ C:\path\to\voicepeak_dataset\
 generate_from_vpp.bat "C:\path\to\voicepeak.vpp" "D:\datasets\voicepeak"
 ```
 
-BAT は `generate_voice_from_voicepeak.exe`、`julius\bin\julius.exe`、日本語モノフォン音響モデルを BAT 自身のディレクトリから解決します。`ffmpeg.exe` は PATH に必要です。VOICEPEAK は通常のインストール場所から VPSDK が検出します。
+BAT は `generate_voice_from_voicepeak.exe`、`julius\bin\julius.exe`、日本語モノフォン音響モデル、同梱した `third_party\segmentation-kit\segment_julius.pl` を BAT 自身のディレクトリから解決します。`ffmpeg.exe` と `perl.exe` は PATH に必要です。VOICEPEAK は通常のインストール場所から VPSDK が検出します。
 
 `--variants 15` は、1 block あたり 15 variant を生成します。速度グループは 5 種類なので、各速度に 3 variant ずつ割り当てられます。
 
@@ -194,9 +210,11 @@ dataset/
    └─ speed_*/
       ├─ wav/
       │  ├─ b000_v003.wav
-      │  └─ b000_v003.lab
+      │  ├─ b000_v003.lab          # alignment 後は時間付き phone label
+      │  ├─ b000_v003.txt          # segmentation-kit に渡したひらがな + sp
+      │  └─ b000_v003.julius.log
       └─ phones/
-         └─ b000_v003.txt
+         └─ b000_v003.txt          # 互換・診断用の直接 phone 列
 ```
 
 ### `.lab`
@@ -240,7 +258,29 @@ sample format: signed 16-bit PCM (pcm_s16le)
 ffmpeg -hide_banner -loglevel error -y -i input.wav -vn -ar 16000 -ac 1 -c:a pcm_s16le -f wav output.wav
 ```
 
-通常の CLI 実行では、`dataset/julius/speed_*/wav/*.lab` は Julius に渡す連結カタカナ転写です。`generate_from_vpp.bat` は生成後に `align_julius.ps1` を呼び出し、この `.lab` を次の WaveSurfer Label 形式へ置き換えます。
+通常の CLI 実行直後は `dataset/julius/speed_*/wav/*.lab` に VPP 由来の連結カタカナ転写が入っています。`generate_from_vpp.bat` は `align_julius.ps1` を呼び出し、次の変換を行います。
+
+```text
+ドオスンノ、コノオミセ。カンッゼンニカンコドリガナイチャッテルジャナイ。
+ ↓
+どおすんの sp このおみせ sp かんっぜんにかんこどりがないちゃってるじゃない
+ ↓
+segment_julius.pl の yomi2voca()
+ ↓
+Julius phone sequence
+ ↓
+forced alignment
+```
+
+`ッ` は句読点ではないため `sp` へ変換されません。したがって `カンッゼン` は `かんっぜん` のまま segmentation-kit に渡され、`yomi2voca()` が `っ -> q` を処理します。文末の `。` は trailing `sp` にせず、segmentation-kit が自動挿入する `silE` に任せます。
+
+alignment 前に作ったひらがな転写は WAV と同じ場所へ保存されます。
+
+```text
+dataset/julius/speed_0.750/wav/b000_v003.txt
+```
+
+alignment 後の `.lab` は WaveSurfer Label 形式です。
 
 ```text
 0.0000000 0.1325000 silB
@@ -248,9 +288,11 @@ ffmpeg -hide_banner -loglevel error -y -i input.wav -vn -ar 16000 -ac 1 -c:a pcm
 ...
 ```
 
-各 WAV の隣に `*.julius.log` も保存されます。アライメント結果は 10 ms フレーム単位で、先頭フレーム以外には Julius/segmentation-kit と同じ 12.5 ms の補正を適用します。
+各 WAV の隣に `*.julius.log` も保存されます。時間変換は公式 segmentation-kit の 10 ms frame + 12.5 ms offset の処理をそのまま使用します。
 
-`ffmpeg` が利用できない場合も通常の WAV、LAB、SBV2、MFA 出力は継続します。この状態は `manifest.json` の `julius.status` と各 `labels.jsonl` の `julius.status` に `not_available` として記録します。BAT は事前に `ffmpeg.exe` を検査して停止します。
+公式 `segment_julius.pl` は古い shell command を含むため、`align_julius.ps1` は各 speed group の WAV/TXT を一時 staging directory にコピーして実行します。これによりユーザーの dataset path に空白が含まれていても、そのパスを Julius の legacy command line に直接渡しません。
+
+`ffmpeg` が利用できない場合も通常の WAV、LAB、SBV2、MFA 出力は継続します。この状態は `manifest.json` の `julius.status` と各 `labels.jsonl` の `julius.status` に `not_available` として記録します。一括 BAT は `ffmpeg` または Perl がない場合に開始前エラーとします。
 
 Julius 用派生 WAV の生成状態は `manifest.json` で確認できます。
 
@@ -258,26 +300,18 @@ Julius 用派生 WAV の生成状態は `manifest.json` で確認できます。
 - `failed`: `ffmpeg` は利用できたが、一部の変換に失敗
 - `not_available`: `ffmpeg` が PATH に存在しない
 
-読みの復元元は VPP の `sentence-list[].tokens[].syl[].s` です。`jp_g2p` で読みを再推定する処理は行いません。
+読みの復元元は VPP の `sentence-list[].tokens[].syl[].s` です。Julius alignment 用の読みを `jp_g2p` で再推定しません。
 
 ### Julius phone labels
 
-`jp_g2p` の SBV2 phone 列を、Julius の語彙・alignment 入力用の空白区切り列へ変換します。
+`julius/speed_*/phones/*.txt` には、既存互換・診断用途として SBV2 phone 列から変換した Julius phone 列も保存します。
 
 ```text
 dataset/julius/speed_0.750/phones/b000_v003.txt
 silB e q sp s o sp silE
 ```
 
-変換規則は次の通りです。
-
-- SBV2 の先頭・末尾 `_` → `silB`・`silE`
-- `cl`・`ッ` → `q`
-- `ー` → `:`
-- `pau`、句読点・区切り記号 → `sp`
-- その他の音素は Julius の phone 名としてそのまま保持
-
-各 utterance の `labels.jsonl` に `julius.phone_status`、`phones_path`、`phones`、`phone_line`、`lexical_phone_line` を保存します。`phone_status=failed` の場合は `phone_error` と `rejects.jsonl` の `julius_phone_conversion` を確認してください。Julius phone 列は `ffmpeg` がなくても生成されます。
+この phone 列は `labels.jsonl` の `julius.phone_status`、`phones_path`、`phones`、`phone_line`、`lexical_phone_line` にも保存されます。ただし、`generate_from_vpp.bat` の正式な forced alignment 入力はこのファイルではありません。正式経路は VPP 確定カタカナ → `wav/*.txt` → segmentation-kit `yomi2voca()` です。
 
 ### `labels.jsonl`
 
@@ -289,7 +323,7 @@ silB e q sp s o sp silE
 - `sbv2`: normalized text、phones、tones、word2ph
 - `mfa`: `.lab` の相対パス、連結カタカナ、pause 数、警告
 - `phone_labels`: VPP 音素・runtime duration・accent・intonation の対応
-- `julius`: 派生 WAV/LAB の状態と phone sequence の相対パス・変換後列
+- `julius`: 派生 WAV/LAB の状態と診断用 phone sequence
 - `runtime`: VOICEPEAK edit response の取得状態
 
 ### `metadata.json`
@@ -321,15 +355,22 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-CI はリリースZIPを生成し、GitHub Release に添付します。
+CI は Julius transcript conversion の回帰テストを実行してからリリース ZIP を生成し、GitHub Release に添付します。
 
-Julius は MinGW ではなく MSVC ベースでビルドし、vcpkg の zlib は静的リンクします。Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
+Julius は MinGW ではなく MSVC ベースでビルドし、vcpkg の zlib は静的リンクします。Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。公式 segmentation-kit の `segment_julius.pl` と MIT License も `third_party/segmentation-kit/` に同梱します。
+
 ```text
 generate_voice_from_voicepeak/
 ├─ generate_voice_from_voicepeak.exe
 ├─ generate_from_vpp.bat
 ├─ align_julius.ps1
 ├─ README.md
+├─ scripts/
+│  └─ julius-transcript.ps1
+├─ third_party/
+│  └─ segmentation-kit/
+│     ├─ segment_julius.pl
+│     └─ License.md
 └─ julius/
    ├─ BUILD-INFO.txt
    ├─ JULIUS-LICENSE
@@ -354,7 +395,7 @@ Push-Location .\julius\grammar-kit
 Pop-Location
 ```
 
-このアプリのデータ生成では、Julius 用 WAV 変換に `ffmpeg` を使用します。`ffmpeg` はリリース zip には含めず、PATH から検出します。未導入の場合も通常の WAV、LAB、SBV2、MFA、phone列の生成は継続します。`generate_from_vpp.bat` は `ffmpeg` がない場合に開始前エラーとし、アライメント未実行のまま終了します。
+このアプリのデータ生成では Julius 用 WAV 変換に `ffmpeg`、公式 segmentation-kit 実行に Perl を使用します。どちらもリリース ZIP には含めず PATH から検出します。通常 CLI は ffmpeg がなくても通常の WAV、LAB、SBV2、MFA、診断用 phone 列の生成を継続します。`generate_from_vpp.bat` は ffmpeg または Perl がない場合に開始前エラーとし、アライメント未実行のまま終了します。
 
 ## MFA 3.4.1 + PostgreSQL
 
@@ -519,6 +560,20 @@ cargo clippy -- -D warnings
 cargo build --release
 ```
 
+Julius 転写変換の回帰テスト:
+
+```powershell
+.\scripts\test-julius-transcript.ps1
+```
+
+このテストには、次のケースを含めています。
+
+- `カンッゼンニ。` → `かんっぜんに`（`ッ` を `sp` にしない）
+- 内部句読点 → 1 個の `sp`
+- 文末句読点 → trailing `sp` なし
+- 長音 `ー` を保持して `yomi2voca()` に渡す
+- `ヴ` 系を upstream が期待する `う゛` 表記へ変換
+
 block を絞った音声生成の検証例:
 
 ```powershell
@@ -538,17 +593,21 @@ cargo run --release -- `
 5. `labels.jsonl` の `mfa.katakana` と `.lab` の本文が一致
 6. `mfa/custom_words.txt` が重複・空行なし
 7. `manifest.json` の `mfa.dictionary.status` が想定どおり
+8. Julius 実行後の `julius/speed_*/wav/*.txt` が VPP 読みに対応する
+9. Julius 実行後の `.lab` に `silB` / phone / `silE` の時間付き行がある
 
 ## 注意事項
 
-- 全量生成は block 数 × variant 数 × 速度別 synthesis のため時間がかかります。最初は `--blocks` で検証してください。
+- 全量生成は block 数 × variant 数 ×速度別 synthesis のため時間がかかります。最初は `--blocks` で検証してください。
 - `--strict` は synthesis / edit response のエラーに対する設定です。読み警告は `metadata.json` と `manifest.json` で確認してください。
 - `custom.dict` は MFA CLI と `japanese_katakana_mfa` が利用可能な場合だけ生成されます。
+- Julius の正式 alignment 経路は公式 segmentation-kit の `yomi2voca()` を使用するため Perl が必要です。
 - 生成物は `.gitignore` の `dataset*` パターンで Git 管理対象外です。
 - このツールは学習素材を生成します。MFA alignment、音響モデル学習、SBV2 モデル学習は別工程です。
 
 ## 参考資料
 
+- [Julius segmentation-kit](https://github.com/julius-speech/segmentation-kit)
 - [Japanese MFA dictionary](https://mfa-models.readthedocs.io/en/latest/dictionary/Japanese/Japanese%20MFA%20dictionary%20v2_0_0.html)
 - [Japanese Katakana MFA G2P model](https://mfa-models.readthedocs.io/en/latest/g2p/Japanese/Japanese%20%28Katakana%29%20MFA%20G2P%20model%20v3_0_0.html)
 - [MFA pronunciation dictionary generation](https://montreal-forced-aligner.readthedocs.io/en/latest/user_guide/workflows/dictionary_generating.html)
