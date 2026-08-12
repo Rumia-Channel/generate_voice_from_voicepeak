@@ -8,6 +8,7 @@ use vpsdk::vpp::ProjectFile;
 use vpsdk::{EditResponsePayload, PipeSession, PlaybackPayload};
 
 use crate::config::{Config, SPEED_VALUES};
+use crate::julius::{build_julius_transcription, write_julius_wav};
 use crate::mfa::{build_mfa_utterance, write_dictionary_artifacts};
 use crate::models::RuntimeVoice;
 use crate::output::{SpeedWriter, speed_group_index, write_reject};
@@ -92,6 +93,12 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
 
     for (block_index, block) in selected_blocks {
         let mfa_utterance = build_mfa_utterance(block);
+        let julius_transcription = config
+            .julius
+            .then(|| build_julius_transcription(&mfa_utterance));
+        if julius_transcription.as_ref().is_some_and(String::is_empty) {
+            return Err(format!("block {block_index}: Julius transcription is empty").into());
+        }
         mfa_dictionary_words.extend(mfa_utterance.dictionary_words.iter().cloned());
         let base_payload = block.to_playback_request();
         let variants = build_variants(
@@ -109,6 +116,8 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             let sample_id = format!("b{block_index:03}_v{:03}", variant.index);
             let audio_rel_path = format!("wav/{sample_id}.wav");
             let lab_rel_path = format!("wav/{sample_id}.lab");
+            let julius_wav_rel_path = format!("julius/{sample_id}.wav");
+            let julius_txt_rel_path = format!("julius/{sample_id}.txt");
             let audio_path = speed_writers[speed_index]
                 .root
                 .join("wav")
@@ -153,6 +162,14 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                 audio_path.with_extension("lab"),
                 format!("{}\n", mfa_utterance.katakana),
             )?;
+
+            if let Some(transcription) = &julius_transcription {
+                let julius_dir = speed_writers[speed_index].root.join("julius");
+                let julius_wav_path = julius_dir.join(format!("{sample_id}.wav"));
+                let julius_txt_path = julius_dir.join(format!("{sample_id}.txt"));
+                write_julius_wav(&audio_path, &julius_wav_path)?;
+                fs::write(&julius_txt_path, format!("{transcription}\n"))?;
+            }
 
             let request_value = payload.to_payload();
             let edit_tokens = match values_to_edit_tokens(&payload.tokens) {
@@ -240,6 +257,15 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
                         .filter(|token| token.pause)
                         .count(),
                     "warnings": mfa_utterance.warnings.clone(),
+                },
+                "julius": {
+                    "enabled": config.julius,
+                    "wav_path": config.julius.then_some(julius_wav_rel_path),
+                    "txt_path": config.julius.then_some(julius_txt_rel_path),
+                    "transcription": julius_transcription.clone(),
+                    "sample_rate": config.julius.then_some(16000),
+                    "channels": config.julius.then_some(1),
+                    "bits_per_sample": config.julius.then_some(16),
                 },
                 "phone_labels": phone_labels,
                 "runtime": {
@@ -330,7 +356,7 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             "vpp_sha256": source_sha256,
             "vpp_version": project.version,
         },
-            "blocks_selected": config.block_indices,
+        "blocks_selected": config.block_indices,
         "counts": {
             "blocks_total": project.project.blocks.len(),
             "blocks_processed": block_count,
@@ -352,6 +378,15 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             "acoustic_model": "japanese_mfa",
             "dictionary": dictionary,
         },
+        "julius": {
+            "enabled": config.julius,
+            "wav_pattern": "speed_*/julius/{utterance_id}.wav",
+            "txt_pattern": "speed_*/julius/{utterance_id}.txt",
+            "sample_rate": 16000,
+            "channels": 1,
+            "bits_per_sample": 16,
+            "transcription": "VPP-derived reading converted to Hiragana; internal VPP pause tokens become explicit sp; silB/silE are left to segmentation-kit",
+        },
         "variation_ranges": {
             "duration_multiplier": [0.5, 2.0],
             "ui_intonation_reference": [-3.0, 3.0],
@@ -367,6 +402,7 @@ pub(crate) fn generate_dataset(config: &Config) -> Result<(), Box<dyn Error>> {
             "SBV2-compatible phones, tones, and word2ph are converted directly from VPP tokens.",
             "The complete playback payload is stored in each speed directory's requests.jsonl for reproducibility.",
             "MFA lab text preserves sentence punctuation and Katakana geminate markers from VPP.",
+            "Julius input preserves kana geminates such as small tsu and maps only actual VPP pause tokens to sp.",
         ],
     });
     fs::write(
@@ -514,5 +550,6 @@ pub(crate) fn print_plan(project: &ProjectFile, config: &Config) {
         block_count * config.variants_per_block
     );
     println!("output: {}", config.output_dir.display());
+    println!("julius inputs: {}", if config.julius { "enabled" } else { "disabled" });
     println!("variation: narrator, emotion, speed, pitch, pause, duration, intonation");
 }
