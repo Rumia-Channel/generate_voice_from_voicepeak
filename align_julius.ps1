@@ -47,7 +47,7 @@ function Convert-KatakanaCharToHiragana {
 
     $code = [int][char]$Character
     if ($code -eq 0x30F4) {
-        # The official yomi2voca() uses the historical decomposed spelling う゛.
+        # The upstream yomi2voca() uses the historical decomposed spelling う゛.
         return ([string][char]0x3046) + ([string][char]0x309B)
     }
     if ($code -ge 0x30A1 -and $code -le 0x30F6) {
@@ -132,14 +132,18 @@ if ($wavDirectories.Count -eq 0) {
     throw "No Julius WAV directories were found under $juliusDatasetRoot"
 }
 
-# The upstream script uses paths relative to its working directory. Build a
-# temporary compatibility layout while continuing to use the packaged Julius
-# executable and grammar-kit acoustic model.
+# Upstream segment_julius.pl uses fixed relative paths and a shell pipeline.
+# Run it against a simple staging tree so spaces in the user's dataset path do
+# not leak into that legacy command line.
 $kitRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("voicepeak-julius-segmentation-" + [guid]::NewGuid().ToString("N"))
 $kitBin = Join-Path $kitRoot "bin"
 $kitModels = Join-Path $kitRoot "models"
-New-Item -ItemType Directory -Force -Path $kitBin, $kitModels | Out-Null
+$kitWav = Join-Path $kitRoot "wav"
+New-Item -ItemType Directory -Force -Path $kitBin, $kitModels, $kitWav | Out-Null
 Copy-Item -LiteralPath $juliusExecutable -Destination (Join-Path $kitBin "julius-4.3.1.exe") -Force
+Get-ChildItem -LiteralPath ([System.IO.Path]::GetDirectoryName($juliusExecutable)) -File -Filter "*.dll" | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $kitBin $_.Name) -Force
+}
 Copy-Item -LiteralPath $hmmdefs -Destination (Join-Path $kitModels "hmmdefs_monof_mix16_gid.binhmm") -Force
 Copy-Item -LiteralPath $segmentationScript -Destination (Join-Path $kitRoot "segment_julius.pl") -Force
 
@@ -147,27 +151,40 @@ $failed = 0
 $aligned = 0
 try {
     foreach ($wavDirectory in $wavDirectories) {
+        Get-ChildItem -LiteralPath $kitWav -Force | Remove-Item -Recurse -Force
         $wavFiles = @(Get-ChildItem -LiteralPath $wavDirectory.FullName -File -Filter "*.wav" | Sort-Object Name)
         if ($wavFiles.Count -eq 0) {
             continue
         }
 
         foreach ($wavFile in $wavFiles) {
-            $labPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
-            $txtPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".txt")
-            if (-not (Test-Path -LiteralPath $labPath -PathType Leaf)) {
-                throw "Pre-alignment VPP Katakana transcription was not found: $labPath"
+            $sourceLabPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
+            if (-not (Test-Path -LiteralPath $sourceLabPath -PathType Leaf)) {
+                throw "Pre-alignment VPP Katakana transcription was not found: $sourceLabPath"
             }
-            $katakana = ([System.IO.File]::ReadAllText($labPath)).Trim()
+            $katakana = ([System.IO.File]::ReadAllText($sourceLabPath)).Trim()
             if ([string]::IsNullOrWhiteSpace($katakana)) {
-                throw "Pre-alignment VPP Katakana transcription is empty: $labPath"
+                throw "Pre-alignment VPP Katakana transcription is empty: $sourceLabPath"
             }
             $transcript = Convert-VppKatakanaToJuliusTranscript -Katakana $katakana
             if ([string]::IsNullOrWhiteSpace($transcript)) {
-                throw "Julius Hiragana transcription is empty: $labPath"
+                throw "Julius Hiragana transcription is empty: $sourceLabPath"
             }
+
+            $stagedWav = Join-Path $kitWav ($wavFile.BaseName + ".wav")
+            $stagedTxt = Join-Path $kitWav ($wavFile.BaseName + ".txt")
+            Copy-Item -LiteralPath $wavFile.FullName -Destination $stagedWav -Force
             [System.IO.File]::WriteAllText(
-                $txtPath,
+                $stagedTxt,
+                $transcript + "`n",
+                (New-Object System.Text.UTF8Encoding($false))
+            )
+
+            # Keep the exact segmentation-kit input beside the source audio for
+            # reproducibility and manual inspection.
+            $datasetTxt = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".txt")
+            [System.IO.File]::WriteAllText(
+                $datasetTxt,
                 $transcript + "`n",
                 (New-Object System.Text.UTF8Encoding($false))
             )
@@ -175,7 +192,7 @@ try {
 
         Push-Location $kitRoot
         try {
-            & $perl (Join-Path $kitRoot "segment_julius.pl") $wavDirectory.FullName
+            & $perl ".\segment_julius.pl" ".\wav"
             if ($LASTEXITCODE -ne 0) {
                 throw "segment_julius.pl exited with status $LASTEXITCODE for $($wavDirectory.FullName)"
             }
@@ -185,25 +202,29 @@ try {
         }
 
         foreach ($wavFile in $wavFiles) {
-            $labPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
-            $logPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".log")
-            $juliusLogPath = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".julius.log")
-            if (-not (Test-Path -LiteralPath $labPath -PathType Leaf)) {
+            $stagedLab = Join-Path $kitWav ($wavFile.BaseName + ".lab")
+            $stagedLog = Join-Path $kitWav ($wavFile.BaseName + ".log")
+            $destinationLab = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".lab")
+            $destinationLog = [System.IO.Path]::ChangeExtension($wavFile.FullName, ".julius.log")
+
+            if (-not (Test-Path -LiteralPath $stagedLab -PathType Leaf)) {
                 $failed++
-                Write-Error "Julius did not generate an alignment LAB: $labPath"
+                Write-Error "Julius did not generate an alignment LAB: $stagedLab"
                 continue
             }
-            $lab = ([System.IO.File]::ReadAllText($labPath)).Trim()
+            $lab = ([System.IO.File]::ReadAllText($stagedLab)).Trim()
             if ([string]::IsNullOrWhiteSpace($lab) -or $lab -notmatch '^\d+\.\d+\s+\d+\.\d+\s+') {
                 $failed++
-                Write-Error "Julius generated an invalid or empty alignment LAB: $labPath"
+                Write-Error "Julius generated an invalid or empty alignment LAB: $stagedLab"
                 continue
             }
-            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
-                Move-Item -LiteralPath $logPath -Destination $juliusLogPath -Force
+
+            Copy-Item -LiteralPath $stagedLab -Destination $destinationLab -Force
+            if (Test-Path -LiteralPath $stagedLog -PathType Leaf) {
+                Copy-Item -LiteralPath $stagedLog -Destination $destinationLog -Force
             }
             $aligned++
-            Write-Host ("aligned={0} lab={1}" -f $aligned, $labPath)
+            Write-Host ("aligned={0} lab={1}" -f $aligned, $destinationLab)
         }
     }
 }
