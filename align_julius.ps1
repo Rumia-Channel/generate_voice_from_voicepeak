@@ -58,7 +58,7 @@ function Start-JuliusProcess {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Executable
     $startInfo.WorkingDirectory = [System.IO.Path]::GetDirectoryName($Executable)
-    $startInfo.Arguments = '-h "' + $Hmmdefs + '" -dfa "' + $DfaPath + '" -v "' + $DictionaryPath + '" -palign -input file'
+    $startInfo.Arguments = '-h "' + $Hmmdefs + '" -dfa "' + $DfaPath + '" -v "' + $DictionaryPath + '" -b 0 -palign -input file'
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true
