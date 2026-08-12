@@ -118,6 +118,31 @@ jobs:
             -Version "${{ github.ref_name }}" `
             -OutputDir ".\dist"
 
+      - name: Verify packaged helper scripts
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem -Path ".\dist\*.zip" -File | Select-Object -First 1
+          if ($null -eq $archive) {
+            throw "Release archive was not produced."
+          }
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
+          try {
+            $requiredEntries = @(
+              "generate_voice_from_voicepeak/generate_from_vpp.bat"
+              "generate_voice_from_voicepeak/align_julius.ps1"
+            )
+            foreach ($requiredEntry in $requiredEntries) {
+              if ($null -eq ($zip.Entries | Where-Object FullName -eq $requiredEntry)) {
+                throw "Release archive is missing required entry: $requiredEntry"
+              }
+            }
+          }
+          finally {
+            $zip.Dispose()
+          }
+
       - uses: actions/upload-artifact@v4
         with:
           name: generate_voice_from_voicepeak_windows_x64

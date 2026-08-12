@@ -71,9 +71,16 @@ try {
 
     Copy-Item -Path $resolvedBinary -Destination (Join-Path $packageDir "generate_voice_from_voicepeak.exe")
 
-    $readmePath = Join-Path $repoRoot "README.md"
-    if (Test-Path -Path $readmePath -PathType Leaf) {
-        Copy-Item -Path $readmePath -Destination (Join-Path $packageDir "README.md")
+    $packageFiles = @(
+        "README.md"
+        "generate_from_vpp.bat"
+        "align_julius.ps1"
+    )
+    foreach ($packageFile in $packageFiles) {
+        $sourcePath = Resolve-RequiredFile `
+            -Path (Join-Path $repoRoot $packageFile) `
+            -Description "Package file $packageFile"
+        Copy-Item -Path $sourcePath -Destination (Join-Path $packageDir $packageFile)
     }
 
     $juliusRuntimeFiles = @(Get-ChildItem -Path $resolvedJuliusRoot -Recurse -File | Where-Object {
@@ -121,9 +128,13 @@ try {
     }
 
     $modelPath = Join-Path $grammarKitPackageDir "model\phone_m\hmmdefs_ptm_gid.binhmm"
+    $monophoneModelPath = Join-Path $grammarKitPackageDir "model\phone_m\hmmdefs_monof_mix16_gid.binhmm"
     $hmmListPath = Join-Path $grammarKitPackageDir "model\phone_m\logicalTri"
     if (-not (Test-Path -Path $modelPath -PathType Leaf)) {
         throw "Japanese Julius acoustic model not found: $modelPath"
+    }
+    if (-not (Test-Path -Path $monophoneModelPath -PathType Leaf)) {
+        throw "Japanese Julius monophone acoustic model not found: $monophoneModelPath"
     }
     if (-not (Test-Path -Path $hmmListPath -PathType Leaf)) {
         throw "Japanese Julius HMM list not found: $hmmListPath"

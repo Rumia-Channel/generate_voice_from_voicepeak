@@ -32,7 +32,7 @@ SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネ
 - VOICEPEAK 本体
 - 解析対象の `.vpp` ファイル
 - MFA alignment を行う場合は MFA 3.4.1、PostgreSQL、日本語モデル
-- ffmpeg（PATH に存在する場合、Julius 用 WAV を自動生成）
+- Julius forced alignment を BAT で行う場合は ffmpeg（PATH に必要）
 
 このリポジトリの既定 VPP パスは次です。
 
@@ -75,6 +75,34 @@ cargo run --release -- `
   dataset `
   --variants 15
 ```
+
+## VPP を指定するだけの一括実行
+
+リリース ZIP に同梱される `generate_from_vpp.bat` は、VPP のパスだけを指定して次を順番に実行します。
+
+1. VOICEPEAK で音声を合成
+2. Julius 用 16 kHz WAV と phone 列を生成
+3. Julius で強制音素アライメントを実行
+4. `dataset\julius\speed_*\wav\*.lab` を時間付きラベルへ置換
+
+```bat
+generate_from_vpp.bat "C:\path\to\voicepeak.vpp"
+```
+
+出力先は既定で次になります。
+
+```text
+C:\path\to\voicepeak_dataset\
+```
+
+出力先を明示する場合だけ第 2 引数を追加できます。
+
+```bat
+generate_from_vpp.bat "C:\path\to\voicepeak.vpp" "D:\datasets\voicepeak"
+```
+
+BAT は `generate_voice_from_voicepeak.exe`、`julius\bin\julius.exe`、日本語モノフォン音響モデルを BAT 自身のディレクトリから解決します。`ffmpeg.exe` は PATH に必要です。VOICEPEAK は通常のインストール場所から VPSDK が検出します。
+開発ツリーで Julius を別の場所に置く場合は、`JULIUS_ROOT` 環境変数で上書きできます。
 
 `--variants 15` は、1 block あたり 15 variant を生成します。速度グループは 5 種類なので、各速度に 3 variant ずつ割り当てられます。
 
@@ -170,10 +198,11 @@ dataset/
       │  └─ b000_v003.lab
       └─ phones/
          └─ b000_v003.txt
+```
 
 ### `.lab`
 
-各 WAV に対応する `.lab` を `speed_*/wav/` に出力します。
+通常の生成では各 WAV に対応する `.lab` を `speed_*/wav/` に出力します。
 
 - 1 WAV = 1 LAB
 - 1 行の連結カタカナ文字列
@@ -189,7 +218,7 @@ dataset/
 ドオスンノ、コノオミセ。カンッゼンニカンコドリガナイチャッテルジャナイ。
 ```
 
-### Julius 用 WAV
+### Julius 用 WAV と強制アライメント
 
 `ffmpeg` が PATH に存在する場合、各 VOICEPEAK WAV から Julius 用の派生 WAV を自動生成します。元の WAV は変更しません。
 
@@ -212,7 +241,17 @@ sample format: signed 16-bit PCM (pcm_s16le)
 ffmpeg -hide_banner -loglevel error -y -i input.wav -vn -ar 16000 -ac 1 -c:a pcm_s16le -f wav output.wav
 ```
 
-`ffmpeg` が利用できない場合も通常の WAV、LAB、SBV2、MFA 出力は継続します。この状態は `manifest.json` の `julius.status` と各 `labels.jsonl` の `julius.status` に `not_available` として記録します。変換に失敗した場合は `rejects.jsonl` の `julius_ffmpeg` に記録し、`--strict` 指定時だけ処理を停止します。
+通常の CLI 実行では、`dataset/julius/speed_*/wav/*.lab` は Julius に渡す連結カタカナ転写です。`generate_from_vpp.bat` は生成後に `align_julius.ps1` を呼び出し、この `.lab` を次の WaveSurfer Label 形式へ置き換えます。
+
+```text
+0.0000000 0.1325000 silB
+0.1425000 0.1725000 e
+...
+```
+
+各 WAV の隣に `*.julius.log` も保存されます。アライメント結果は 10 ms フレーム単位で、先頭フレーム以外には Julius/segmentation-kit と同じ 12.5 ms の補正を適用します。
+
+`ffmpeg` が利用できない場合も通常の WAV、LAB、SBV2、MFA 出力は継続します。この状態は `manifest.json` の `julius.status` と各 `labels.jsonl` の `julius.status` に `not_available` として記録します。BAT は事前に `ffmpeg.exe` を検査して停止します。
 
 Julius 用派生 WAV の生成状態は `manifest.json` で確認できます。
 
@@ -288,12 +327,15 @@ CI は次を順番に実行します。
 1. `generate_voice_from_voicepeak.exe` を `cargo build --locked --release` でビルド
 2. [Rumia-Channel/julius](https://github.com/Rumia-Channel/julius) を取得し、CMake の `x64-windows-ninja` preset と MSVC x64 で Windows 用 Julius とツール群をビルド
 3. [julius-speech/grammar-kit](https://github.com/julius-speech/grammar-kit) から日本語音響モデル、HMM list、サンプルデータを取得
-4. すべてを `generate_voice_from_voicepeak_windows_x64_<tag>.zip` にまとめて GitHub Release へ添付
+4. 生成ZIPに `generate_from_vpp.bat` と `align_julius.ps1` が含まれることを検査
+5. すべてを `generate_voice_from_voicepeak_windows_x64_<tag>.zip` にまとめて GitHub Release へ添付
 
 Julius は MinGW ではなく MSVC ベースでビルドし、vcpkg の zlib は静的リンクします。Julius と grammar-kit のコミットは workflow に固定し、生成した zip の `julius/BUILD-INFO.txt` に記録します。リリース zip の構造は次の通りです。
 ```text
 generate_voice_from_voicepeak/
 ├─ generate_voice_from_voicepeak.exe
+├─ generate_from_vpp.bat
+├─ align_julius.ps1
 ├─ README.md
 └─ julius/
    ├─ BUILD-INFO.txt
@@ -305,6 +347,7 @@ generate_voice_from_voicepeak/
    │  └─ *.exe / *.dll
    └─ grammar-kit/
       ├─ model/phone_m/
+      │  ├─ hmmdefs_monof_mix16_gid.binhmm
       │  ├─ hmmdefs_ptm_gid.binhmm
       │  └─ logicalTri
       └─ SampleGrammars/
@@ -318,7 +361,7 @@ Push-Location .\julius\grammar-kit
 Pop-Location
 ```
 
-このアプリのデータ生成では、Julius 用 WAV 変換に `ffmpeg` を使用します。`ffmpeg` はリリース zip には含めず、PATH から検出します。未導入の場合も通常の WAV、LAB、SBV2、MFA、phone列の生成は継続します。
+このアプリのデータ生成では、Julius 用 WAV 変換に `ffmpeg` を使用します。`ffmpeg` はリリース zip には含めず、PATH から検出します。未導入の場合も通常の WAV、LAB、SBV2、MFA、phone列の生成は継続します。`generate_from_vpp.bat` は `ffmpeg` がない場合に開始前エラーとし、アライメント未実行のまま終了します。
 
 ## MFA 3.4.1 + PostgreSQL
 
