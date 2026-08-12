@@ -9,7 +9,7 @@ pub(crate) const SPEED_VALUES: [f64; 5] = [0.75, 0.875, 1.0, 1.125, 1.25];
 
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
-    pub(crate) vpp_path: PathBuf,
+    pub(crate) vpp_paths: Vec<PathBuf>,
     pub(crate) output_dir: PathBuf,
     pub(crate) variants_per_block: usize,
     pub(crate) max_blocks: Option<usize>,
@@ -19,19 +19,31 @@ pub(crate) struct Config {
 }
 
 pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
+    parse_args_from(env::args().skip(1))
+}
+
+pub(crate) fn parse_args_from<I>(args: I) -> Result<Config, Box<dyn Error>>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut positional = Vec::new();
+    let mut vpp_paths = Vec::new();
     let mut variants_per_block = DEFAULT_VARIANTS_PER_BLOCK;
     let mut max_blocks = None;
     let mut block_indices = None;
     let mut strict = false;
     let mut dry_run = false;
 
-    let mut args = env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
+            }
+            "--vpp" => {
+                let path = args.next().ok_or("--vpp requires a VPP path")?;
+                vpp_paths.push(PathBuf::from(path));
             }
             "--variants" => {
                 variants_per_block = args
@@ -74,14 +86,42 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
         }
     }
 
-    let vpp_path = positional
-        .first()
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_VPP_PATH));
-    let output_dir = positional
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR));
+    let output_dir = if vpp_paths.is_empty() {
+        match positional.as_slice() {
+            [] => {
+                vpp_paths.push(PathBuf::from(DEFAULT_VPP_PATH));
+                PathBuf::from(DEFAULT_OUTPUT_DIR)
+            }
+            [vpp] => {
+                vpp_paths.push(vpp.clone());
+                PathBuf::from(DEFAULT_OUTPUT_DIR)
+            }
+            [vpp, output] => {
+                vpp_paths.push(vpp.clone());
+                output.clone()
+            }
+            _ => {
+                return Err(
+                    "multiple VPP files require repeatable --vpp PATH options; positional syntax supports one VPP and one output directory"
+                        .into(),
+                );
+            }
+        }
+    } else {
+        if positional.len() > 1 {
+            return Err(
+                "with --vpp, specify at most one positional argument for the output directory"
+                    .into(),
+            );
+        }
+        positional
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_OUTPUT_DIR))
+    };
+    if vpp_paths.is_empty() {
+        return Err("at least one VPP path is required".into());
+    }
     if max_blocks.is_some() && block_indices.is_some() {
         return Err("--blocks cannot be combined with --max-blocks".into());
     }
@@ -94,7 +134,7 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
     }
 
     Ok(Config {
-        vpp_path,
+        vpp_paths,
         output_dir,
         variants_per_block,
         max_blocks,
@@ -107,15 +147,18 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
 pub(crate) fn print_help() {
     println!(
         "Usage: generate_voice_from_voicepeak [VPP_PATH] [OUTPUT_DIR] [OPTIONS]\n\n\
-         Generates SBV2-compatible data converted directly from VPP plus VPP-conditioned VOICEPEAK audio.\n\n\
+         Generates SBV2-compatible data converted directly from one or more VPP files plus VPP-conditioned VOICEPEAK audio.\n\n\
          Options:\n\
-           --variants N       Total variants per block; evenly split by speed (default: {DEFAULT_VARIANTS_PER_BLOCK})
-           --max-blocks N      Process only the first N blocks
-           --blocks LIST       Process selected zero-based block indices, e.g. 0,14,79,99
-           --strict            Stop at the first synthesis or alignment error
-           --dry-run           Print the generation plan without launching VOICEPEAK
+           --vpp PATH         Add a VPP input; repeat for multiple VPP files\n\
+           --variants N       Total variants per block; evenly split by speed (default: {DEFAULT_VARIANTS_PER_BLOCK})\n\
+           --max-blocks N      Process only the first N blocks of each VPP\n\
+           --blocks LIST       Process selected zero-based block indices in each VPP, e.g. 0,14,79,99\n\
+           --strict            Stop at the first synthesis or alignment error\n\
+           --dry-run           Print the generation plan without launching VOICEPEAK\n\
          Defaults:\n\
            VPP_PATH    {DEFAULT_VPP_PATH}\n\
-           OUTPUT_DIR  {DEFAULT_OUTPUT_DIR}"
+           OUTPUT_DIR  {DEFAULT_OUTPUT_DIR}\n\n\
+         Multiple VPP example:\n\
+           generate_voice_from_voicepeak.exe --vpp first.vpp --vpp second.vpp dataset-root"
     );
 }

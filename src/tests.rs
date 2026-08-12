@@ -6,7 +6,7 @@ use super::util::hex_sha256;
 use super::voicepeak::mutate_token_values;
 use serde_json::{Map, json};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use vpsdk::SynthesisParams;
 
 #[test]
@@ -333,6 +333,36 @@ fn converts_wav_to_julius_format_when_ffmpeg_is_available() {
     assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
 
     fs::remove_dir_all(root).expect("remove temporary test directory");
+}
+
+#[test]
+fn accepts_repeated_vpp_options_with_shared_output() {
+    let config = super::config::parse_args_from(vec![
+        "--vpp".to_string(),
+        "first.vpp".to_string(),
+        "--vpp".to_string(),
+        "second.vpp".to_string(),
+        "dataset".to_string(),
+        "--variants".to_string(),
+        "10".to_string(),
+    ])
+    .expect("parse repeated VPP options");
+
+    assert_eq!(config.vpp_paths.len(), 2);
+    assert_eq!(config.vpp_paths[0], Path::new("first.vpp"));
+    assert_eq!(config.vpp_paths[1], Path::new("second.vpp"));
+    assert_eq!(config.output_dir, Path::new("dataset"));
+    assert_eq!(config.variants_per_block, 10);
+}
+
+#[test]
+fn preserves_single_vpp_positional_syntax() {
+    let config =
+        super::config::parse_args_from(vec!["voicepeak.vpp".to_string(), "dataset".to_string()])
+            .expect("parse legacy positional syntax");
+
+    assert_eq!(config.vpp_paths, vec![PathBuf::from("voicepeak.vpp")]);
+    assert_eq!(config.output_dir, Path::new("dataset"));
 }
 
 fn write_test_wav(path: &Path) {

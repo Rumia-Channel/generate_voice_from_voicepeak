@@ -15,8 +15,10 @@ use vpsdk::vpp::ProjectFile;
 fn main() -> Result<(), Box<dyn Error>> {
     let config = config::parse_args()?;
     if config.dry_run {
-        let project = ProjectFile::from_path(&config.vpp_path)?;
-        generator::print_plan(&project, &config);
+        for vpp_path in &config.vpp_paths {
+            let project = ProjectFile::from_path(vpp_path)?;
+            generator::print_plan(vpp_path, &project, &config);
+        }
         return Ok(());
     }
 

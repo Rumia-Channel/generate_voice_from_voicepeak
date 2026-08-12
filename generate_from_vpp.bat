@@ -1,22 +1,55 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
-if "%~1"=="" (
-    echo Usage: %~nx0 "path\to\voicepeak.vpp" [output-directory]
-    echo.
-    echo The output directory defaults to ^<VPP directory^>\^<VPP name^>_dataset.
-    exit /b 64
+if "%~1"=="" goto usage
+
+set "SCRIPT_DIR=%~dp0"
+set "VPP_ANCHOR=%~f1"
+set "OUTPUT_DIR="
+set "VPP_ARGS="
+set /a VPP_COUNT=0
+
+rem Keep the original "one VPP, one output directory" syntax working.
+if "%~3"=="" if not "%~2"=="" if /i not "%~x2"==".vpp" (
+    if not exist "%~f1" (
+        echo ERROR: VPP file not found: %~1 1>&2
+        exit /b 2
+    )
+    set "VPP_ARGS=--vpp ^"%~f1^""
+    set "VPP_COUNT=1"
+    set "OUTPUT_DIR=%~f2"
+    goto parsed
 )
 
-if not exist "%~1" (
+:parse
+if "%~1"=="" goto parsed
+if /i "%~1"=="--output" goto parse_output
+if /i "%~1"=="--output-dir" goto parse_output
+if not exist "%~f1" (
     echo ERROR: VPP file not found: %~1 1>&2
     exit /b 2
 )
+set "VPP_ARGS=%VPP_ARGS% --vpp ^"%~f1^""
+set /a VPP_COUNT+=1
+shift
+goto parse
 
-set "SCRIPT_DIR=%~dp0"
-set "VPP_PATH=%~f1"
-set "OUTPUT_DIR=%~dpn1_dataset"
-if not "%~2"=="" set "OUTPUT_DIR=%~f2"
+:parse_output
+if "%~2"=="" (
+    echo ERROR: %~1 requires an output directory. 1>&2
+    exit /b 64
+)
+set "OUTPUT_DIR=%~f2"
+shift
+shift
+goto parse
+
+:parsed
+if "%VPP_COUNT%"=="0" (
+    echo ERROR: at least one VPP file is required. 1>&2
+    exit /b 64
+)
+if not defined OUTPUT_DIR for %%I in ("%VPP_ANCHOR%") do set "OUTPUT_DIR=%%~dpnI_dataset"
 
 set "GENERATOR=%SCRIPT_DIR%generate_voice_from_voicepeak.exe"
 if not exist "%GENERATOR%" if exist "%SCRIPT_DIR%target\release\generate_voice_from_voicepeak.exe" set "GENERATOR=%SCRIPT_DIR%target\release\generate_voice_from_voicepeak.exe"
@@ -45,7 +78,7 @@ if not exist "%POWERSHELL%" (
 if "%JULIUS_ROOT%"=="" set "JULIUS_ROOT=%SCRIPT_DIR%julius"
 
 echo [1/2] Synthesizing VOICEPEAK audio and preparing Julius inputs...
-"%GENERATOR%" "%VPP_PATH%" "%OUTPUT_DIR%" --strict
+"%GENERATOR%" %VPP_ARGS% "%OUTPUT_DIR%" --strict
 if errorlevel 1 (
     echo ERROR: audio synthesis or label preparation failed. 1>&2
     exit /b 10
@@ -61,3 +94,9 @@ if errorlevel 1 (
 echo Completed.
 echo Output: %OUTPUT_DIR%
 exit /b 0
+
+:usage
+echo Usage: %~nx0 "first.vpp" ["second.vpp" ...] [--output "directory"]
+echo.
+echo Legacy syntax: %~nx0 "voicepeak.vpp" ["output-directory"]
+exit /b 64

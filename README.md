@@ -34,13 +34,14 @@ SBV2 の phone、tone、word2ph、VPP 音素長、アクセント、イントネ
 - MFA alignment を行う場合は MFA 3.4.1、PostgreSQL、日本語モデル
 - Julius forced alignment を BAT で行う場合は ffmpeg（PATH に必要）
 
-このリポジトリの既定 VPP パスは次です。
+このリポジトリの既定値は次の通りです。
 
 ```text
-voicepeak.vpp
+VPP_PATH    voicepeak.vpp
+OUTPUT_DIR  dataset
 ```
 
-別の VPP を使う場合は、コマンドの第 1 引数で指定してください。
+単一 VPP は位置引数で従来どおり指定できます。複数 VPP を同じ dataset にまとめる場合は `--vpp` を繰り返します。
 
 ## ビルド
 
@@ -75,31 +76,32 @@ cargo run --release -- `
   dataset `
   --variants 15
 ```
-
 ## VPP を指定するだけの一括実行
 
-リリース ZIP に同梱される `generate_from_vpp.bat` は、VPP のパスだけを指定して次を順番に実行します。
+リリース ZIP に同梱される `generate_from_vpp.bat` は、指定した VPP ごとに `--vpp` を組み立て、次を順番に実行します。
 
 1. VOICEPEAK で音声を合成
 2. Julius 用 16 kHz WAV と phone 列を生成
 3. Julius で強制音素アライメントを実行
 4. `dataset\julius\speed_*\wav\*.lab` を時間付きラベルへ置換
 
-```bat
-generate_from_vpp.bat "C:\path\to\voicepeak.vpp"
-```
-
-出力先は既定で次になります。
-
-```text
-C:\path\to\voicepeak_dataset\
-```
-
-出力先を明示する場合だけ第 2 引数を追加できます。
+単一 VPP の従来形式:
 
 ```bat
 generate_from_vpp.bat "C:\path\to\voicepeak.vpp" "D:\datasets\voicepeak"
 ```
+
+複数 VPP は、各 VPP を位置引数に並べ、出力先を `--output` で指定します。
+
+```bat
+generate_from_vpp.bat ^
+  "C:\path\to\voicepeak-a.vpp" ^
+  "C:\path\to\voicepeak-b.vpp" ^
+  --output "D:\datasets\voicepeak"
+```
+
+`--output` を省略した場合は、先頭 VPP の隣に `<VPP name>_dataset` を作成します。
+複数 VPP のサンプル ID は `s000_b000_v000` の形式となり、入力間の衝突を防ぎます。
 
 BAT は `generate_voice_from_voicepeak.exe`、`julius\bin\julius.exe`、日本語モノフォン音響モデルを BAT 自身のディレクトリから解決します。`ffmpeg.exe` は PATH に必要です。VOICEPEAK は通常のインストール場所から VPSDK が検出します。
 
@@ -118,6 +120,17 @@ VOICEPEAK を起動・接続せず、VPP と生成数だけ確認します。
 ```powershell
 cargo run --release -- `
   "voicepeak.vpp" `
+  dataset `
+  --variants 15 `
+  --dry-run
+```
+
+複数 VPP の生成計画も同じ形式で確認できます。各入力の block 数と総サンプル数が VPP ごとに表示されます。
+
+```powershell
+cargo run --release -- `
+  --vpp "voicepeak-a.vpp" `
+  --vpp "voicepeak-b.vpp" `
   dataset `
   --variants 15 `
   --dry-run
@@ -153,16 +166,28 @@ cargo run --release -- `
 
 ```text
 Usage: generate_voice_from_voicepeak [VPP_PATH] [OUTPUT_DIR] [OPTIONS]
+       generate_voice_from_voicepeak --vpp PATH [--vpp PATH ...] [OUTPUT_DIR] [OPTIONS]
 
+--vpp PATH         VPP input; repeat for multiple VPP files
 --variants N       1 block あたりの総 variant 数。5 の倍数。既定値: 15
---max-blocks N     先頭から N block だけ処理
---blocks LIST      指定した 0-based block だけ処理。例: 0,14,79,99
+--max-blocks N     各 VPP の先頭から N block だけ処理
+--blocks LIST      各 VPP で指定した 0-based block だけ処理。例: 0,14,79,99
 --strict           最初の音声合成・edit response エラーで停止
 --dry-run          VOICEPEAK を起動せず生成計画を表示
 -h, --help         ヘルプ表示
 ```
 
-位置引数を省略した場合:
+位置引数は単一 VPP と出力先の後方互換用です。複数 VPP は `--vpp` を繰り返し、出力先を最後の位置引数に指定します。
+
+```powershell
+.\target\release\generate_voice_from_voicepeak.exe `
+  --vpp "voicepeak-a.vpp" `
+  --vpp "voicepeak-b.vpp" `
+  dataset `
+  --variants 15
+```
+
+位置引数と `--vpp` を混在させる場合、位置引数は出力先としてのみ解釈されます。
 
 ```text
 VPP_PATH    voicepeak.vpp
@@ -198,6 +223,7 @@ dataset/
       └─ phones/
          └─ b000_v003.txt
 ```
+単一 VPP では従来どおり `b000_v000` の ID を使います。複数 VPP では `s<source>_b<block>_v<variant>` を使い、各入力の `manifest.json` の `sources` 配列に SHA-256、総 block 数、処理 block 数を記録します。
 
 ### `.lab`
 
@@ -313,12 +339,12 @@ MFA 用の全 utterance 情報をまとめたファイルです。
 
 ## GitHub Actionsリリース
 
-`tag` は `Cargo.toml` の version と一致している必要があります。現在の version では `v0.1.0` または `0.1.0` を使用します。`-rc.1` のような suffix は prerelease として扱われます。
+`tag` は `Cargo.toml` の version と一致している必要があります。現在の version は `0.1.1` なので、`v0.1.1` または `0.1.1` を使用します。`-rc.1` のような suffix は prerelease として扱われます。
 `v*` または数字で始まる tag を push すると、`.github/workflows/release.yml` が Windows x64 向けリリースを作成します。
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 CI はリリースZIPを生成し、GitHub Release に添付します。
