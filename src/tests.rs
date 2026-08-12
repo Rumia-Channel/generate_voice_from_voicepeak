@@ -1,8 +1,9 @@
 use serde_json::{Map, Value, json};
 use vpsdk::SynthesisParams;
 
+use super::julius::{build_julius_transcription, resample_for_test};
 use super::mfa::build_mfa_utterance_from_sentences;
-use super::models::Variant;
+use super::models::{MfaTokenRecord, MfaUtterance, Variant};
 use super::sbv2::{sbv2_from_vpp, symbols_match};
 use super::util::hex_sha256;
 use super::voicepeak::mutate_token_values;
@@ -175,6 +176,46 @@ fn reconstructs_concatenated_katakana_lab_without_inserted_spaces() {
     assert!(utterance.tokens[1].pause);
     assert!(utterance.warnings.is_empty());
     assert_eq!(utterance.dictionary_words, ["カン", "ゼン", "ッ", "ニ"]);
+}
+
+#[test]
+fn builds_julius_hiragana_with_only_real_internal_pauses_as_sp() {
+    let token = |surface: &str, reading: &str, pause: bool| MfaTokenRecord {
+        sentence_index: 0,
+        token_index: 0,
+        surface: surface.to_string(),
+        reading: reading.to_string(),
+        pause,
+        warning: None,
+    };
+    let utterance = MfaUtterance {
+        text: "どうすんの、このお店。完ッ全に閑古鳥が鳴いちゃってるじゃない。".to_string(),
+        katakana: "ドオスンノ、コノオミセ。カンッゼンニカンコドリガナイチャッテルジャナイ。".to_string(),
+        tokens: vec![
+            token("どうすんの", "ドオスンノ", false),
+            token("、", "", true),
+            token("このお店", "コノオミセ", false),
+            token("。", "", true),
+            token("完", "カン", false),
+            token("ッ", "", true),
+            token("全に閑古鳥が鳴いちゃってるじゃない", "ゼンニカンコドリガナイチャッテルジャナイ", false),
+            token("。", "", true),
+        ],
+        warnings: Vec::new(),
+        dictionary_words: Vec::new(),
+    };
+
+    assert_eq!(
+        build_julius_transcription(&utterance),
+        "どおすんの sp このおみせ sp かんっぜんにかんこどりがないちゃってるじゃない"
+    );
+}
+
+#[test]
+fn julius_resampler_produces_the_expected_16khz_length() {
+    let input = vec![0.0; 48_000];
+    let output = resample_for_test(&input, 48_000, 16_000);
+    assert_eq!(output.len(), 16_000);
 }
 
 #[test]
