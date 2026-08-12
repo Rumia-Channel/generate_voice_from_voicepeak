@@ -1,5 +1,6 @@
 mod config;
 mod generator;
+mod julius;
 mod mfa;
 mod models;
 mod output;
