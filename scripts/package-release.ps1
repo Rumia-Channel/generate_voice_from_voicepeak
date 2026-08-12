@@ -83,6 +83,13 @@ try {
         Copy-Item -Path $sourcePath -Destination (Join-Path $packageDir $packageFile)
     }
 
+    $segmentationKitSource = Resolve-RequiredDirectory `
+        -Path (Join-Path $repoRoot "third_party\segmentation-kit") `
+        -Description "Julius segmentation-kit helper"
+    $segmentationKitDestination = Join-Path $packageDir "third_party\segmentation-kit"
+    New-Item -ItemType Directory -Force -Path $segmentationKitDestination | Out-Null
+    Copy-Item -Path (Join-Path $segmentationKitSource "*") -Destination $segmentationKitDestination -Recurse -Force
+
     $juliusRuntimeFiles = @(Get-ChildItem -Path $resolvedJuliusRoot -Recurse -File | Where-Object {
         $_.Extension.ToLowerInvariant() -in @(".exe", ".dll")
     })
@@ -108,9 +115,6 @@ try {
         -Path (Resolve-RequiredFile -Path (Join-Path $resolvedJuliusRoot "LICENSE") -Description "Julius license") `
         -Destination (Join-Path $juliusPackageDir "JULIUS-LICENSE")
 
-    # grammar-kit supplies the Japanese acoustic model, sample grammars and
-    # configuration files. Its prebuilt binaries are omitted so the package
-    # always uses the decoder/tools built from Rumia-Channel/julius.
     foreach ($item in Get-ChildItem -Path $resolvedGrammarKitRoot -Force) {
         if ($item.Name -eq ".git" -or $item.Name -eq "bin") {
             continue
@@ -146,6 +150,7 @@ try {
         "Julius commit: $JuliusRef"
         "Grammar-kit repository: https://github.com/julius-speech/grammar-kit.git"
         "Grammar-kit commit: $GrammarKitRef"
+        "Segmentation-kit: vendored under third_party/segmentation-kit (MIT)"
     )
     $buildInfo | Set-Content -Path (Join-Path $juliusPackageDir "BUILD-INFO.txt") -Encoding utf8
 
