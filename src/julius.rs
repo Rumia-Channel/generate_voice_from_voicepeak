@@ -1,4 +1,4 @@
-use crate::models::{MfaUtterance, Sbv2Equivalent};
+use crate::models::Sbv2Equivalent;
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -18,95 +18,6 @@ impl JuliusPhoneSequence {
     }
 }
 
-/// Build the transcription format consumed by Julius' official segmentation-kit.
-///
-/// The source of truth is the pronunciation already fixed in the VPP, not a
-/// second Japanese G2P pass.  Katakana is converted to Hiragana because
-/// segment_julius.pl's yomi2voca() accepts Hiragana.  Real internal VPP pause
-/// tokens become `sp`; leading/trailing pauses are omitted because
-/// segmentation-kit inserts silB/silE itself.
-pub(crate) fn build_julius_transcription(utterance: &MfaUtterance) -> String {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut pending_pause = false;
-
-    for token in &utterance.tokens {
-        let kana = if !token.reading.is_empty() {
-            Some(token.reading.as_str())
-        } else if is_kana_surface(&token.surface) {
-            // Important: VOICEPEAK can store a standalone small ッ with an
-            // empty reading and a pau-like phone.  It is still an orthographic
-            // geminate marker, not a pause, so preserve the surface first.
-            Some(token.surface.as_str())
-        } else {
-            None
-        };
-
-        if let Some(kana) = kana {
-            if pending_pause {
-                flush_transcription_chunk(&mut current, &mut parts);
-                if !parts.is_empty() && parts.last().is_none_or(|part| part != "sp") {
-                    parts.push("sp".to_string());
-                }
-                pending_pause = false;
-            }
-            current.push_str(&katakana_to_hiragana(kana));
-            continue;
-        }
-
-        if token.pause {
-            // Delay emission until another voiced/kana chunk is observed, so
-            // final punctuation does not create a redundant trailing `sp`.
-            pending_pause = !current.is_empty() || !parts.is_empty();
-        }
-    }
-
-    flush_transcription_chunk(&mut current, &mut parts);
-    while parts.last().is_some_and(|part| part == "sp") {
-        parts.pop();
-    }
-    parts.join(" ")
-}
-
-fn flush_transcription_chunk(current: &mut String, parts: &mut Vec<String>) {
-    if !current.is_empty() {
-        parts.push(std::mem::take(current));
-    }
-}
-
-fn is_kana_surface(value: &str) -> bool {
-    !value.is_empty()
-        && value.chars().all(|character| {
-            matches!(
-                character,
-                '\u{3040}'..='\u{309f}'
-                    | '\u{30a0}'..='\u{30ff}'
-                    | '\u{31f0}'..='\u{31ff}'
-            )
-        })
-}
-
-fn katakana_to_hiragana(value: &str) -> String {
-    let mut output = String::new();
-    for character in value.chars() {
-        match character {
-            // segment_julius.pl contains its ヴ-family rules in the historical
-            // decomposed form `う゛`.
-            'ヴ' | 'ゔ' => output.push_str("う゛"),
-            '\u{30a1}'..='\u{30f6}' => {
-                output.push(char::from_u32(character as u32 - 0x60).unwrap_or(character));
-            }
-            _ => output.push(character),
-        }
-    }
-    output
-}
-
-/// Legacy/self-contained path used by align_julius.ps1.
-///
-/// This remains available so release archives do not acquire a Perl runtime
-/// dependency.  The canonical segmentation-kit-compatible transcription is
-/// generated separately by build_julius_transcription().
 pub(crate) fn sbv2_to_julius(input: &Sbv2Equivalent) -> Result<JuliusPhoneSequence, String> {
     if input.phones.len() < 2 {
         return Err("SBV2 phone sequence must contain boundary guards".to_string());
@@ -232,7 +143,7 @@ pub(crate) fn prepare_output(root: &Path, speeds: &[f64]) -> Result<(), Box<dyn 
             let path = entry?.path();
             if matches!(
                 path.extension().and_then(|value| value.to_str()),
-                Some("wav" | "lab" | "txt" | "log" | "dfa" | "dict")
+                Some("wav" | "lab")
             ) {
                 fs::remove_file(path)?;
             }
