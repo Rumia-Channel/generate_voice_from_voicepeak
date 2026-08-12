@@ -167,6 +167,24 @@ fn converts_small_vowel_and_long_vowel_for_julius() {
 }
 
 #[test]
+fn converts_jp_g2p_ty_for_julius_model() {
+    let sbv2 = Sbv2Equivalent {
+        normalized_text: "テョ".to_string(),
+        phones: vec![
+            "_".to_string(),
+            "ty".to_string(),
+            "o".to_string(),
+            "_".to_string(),
+        ],
+        tones: vec![0; 4],
+        word2ph: vec![1; 4],
+    };
+
+    let output = sbv2_to_julius(&sbv2).expect("Julius conversion");
+    assert_eq!(output.line(), "silB ch o silE");
+}
+
+#[test]
 fn rejects_sbv2_without_julius_boundary_guards() {
     let sbv2 = Sbv2Equivalent {
         normalized_text: "え".to_string(),

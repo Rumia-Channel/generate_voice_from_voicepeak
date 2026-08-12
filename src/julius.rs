@@ -61,6 +61,10 @@ fn julius_phone(phone: &str, previous: Option<&str>) -> Result<String, String> {
 
     let mapped = match phone {
         "cl" | "ッ" => "q".to_string(),
+        "ty" => {
+            // The bundled Japanese monophone model has `ch` but no `ty`.
+            "ch".to_string()
+        }
         "ぁ" => "a".to_string(),
         "ぃ" => "i".to_string(),
         "ぅ" => "u".to_string(),
