@@ -16,6 +16,7 @@ pub(crate) struct Config {
     pub(crate) block_indices: Option<Vec<usize>>,
     pub(crate) strict: bool,
     pub(crate) dry_run: bool,
+    pub(crate) julius: bool,
 }
 
 pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
@@ -25,6 +26,7 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
     let mut block_indices = None;
     let mut strict = false;
     let mut dry_run = false;
+    let mut julius = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -67,6 +69,7 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
             }
             "--strict" => strict = true,
             "--dry-run" => dry_run = true,
+            "--julius" => julius = true,
             value if value.starts_with('-') => {
                 return Err(format!("unknown option: {value}").into());
             }
@@ -101,6 +104,7 @@ pub(crate) fn parse_args() -> Result<Config, Box<dyn Error>> {
         block_indices,
         strict,
         dry_run,
+        julius,
     })
 }
 
@@ -109,11 +113,12 @@ pub(crate) fn print_help() {
         "Usage: generate_voice_from_voicepeak [VPP_PATH] [OUTPUT_DIR] [OPTIONS]\n\n\
          Generates SBV2-compatible data converted directly from VPP plus VPP-conditioned VOICEPEAK audio.\n\n\
          Options:\n\
-           --variants N       Total variants per block; evenly split by speed (default: {DEFAULT_VARIANTS_PER_BLOCK})
-           --max-blocks N      Process only the first N blocks
-           --blocks LIST       Process selected zero-based block indices, e.g. 0,14,79,99
-           --strict            Stop at the first synthesis or alignment error
-           --dry-run           Print the generation plan without launching VOICEPEAK
+           --variants N       Total variants per block; evenly split by speed (default: {DEFAULT_VARIANTS_PER_BLOCK})\n\
+           --max-blocks N     Process only the first N blocks\n\
+           --blocks LIST      Process selected zero-based block indices, e.g. 0,14,79,99\n\
+           --julius           Also generate Julius segmentation-kit WAV/TXT inputs\n\
+           --strict           Stop at the first synthesis or alignment error\n\
+           --dry-run          Print the generation plan without launching VOICEPEAK\n\
          Defaults:\n\
            VPP_PATH    {DEFAULT_VPP_PATH}\n\
            OUTPUT_DIR  {DEFAULT_OUTPUT_DIR}"
